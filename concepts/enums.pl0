@@ -1,0 +1,59 @@
+sub simple_enums {
+	enum Direction { North, East, South, West }
+
+	assert int(Direction.North) == 0
+	assert int(Direction.East)  == 1
+	assert int(Direction.South) == 2
+	assert int(Direction.West)  == 3
+
+
+	// Enums can have gaps between values
+	enum With_Gaps { A, B = 3, C = 100, D }
+
+	{
+		// Enums can be used to bring constants into current scope
+		use With_Gaps
+		assert int(A) == 0
+		assert int(B) == 3
+		assert int(C) == 100
+		assert int(D) == 101
+	}
+}
+
+sub nested_enums {
+	enum Token_Kind {
+		Int
+		String
+		Identifier
+
+		Keyword {
+			Subroutine
+			If
+			For
+		}
+
+		Intrinsic {
+			Syscall
+		}
+	}
+
+	var token = Token_Kind.Keyword.Subroutine
+	assert Token_Kind.as_string(token) == "Keyword.Subroutine"
+	assert Keyword.as_string(token) == "Subroutine"
+
+	if token == .Keyword {
+		print("We got keyword of type ")
+		if token == .Subroutine {
+			println("subroutine")
+		} else if token == .Keyword.If {
+			println("if")
+		} else {
+			println("for")
+		}
+	}
+}
+
+sub main {
+	simple_enums()
+	nested_enums()
+}

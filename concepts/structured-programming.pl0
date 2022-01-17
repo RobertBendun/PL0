@@ -1,0 +1,38 @@
+sub loops_and_conditions {
+	var i = 0
+	for i < 3 {
+		println("Condition based loop")
+		++i
+	}
+
+	i = 0
+	for {
+		if i == 2 {
+			println("Hello, from special case inside loop")
+			continue
+		}
+		println("Hello, from infinite loop")
+
+		if i > 3 {
+			break
+		}
+	}
+}
+
+
+sub recursion {
+	sub factorial(n) {
+		return if n > 1 {
+			n * factorial(n-1)
+		} else {
+			1
+		}
+	}
+
+	assert factorial(5) == 120
+}
+
+sub main {
+	loops_and_conditions()
+	recursion()
+}

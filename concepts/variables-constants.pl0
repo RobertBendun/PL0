@@ -1,0 +1,27 @@
+const Default_Exit_Code = 0
+
+// Optional name might be given to namespace constants
+// works for var too
+const Initial (
+	X = 10
+	Y = 10 + 10
+)
+
+sub exit(exit_code) {
+	#syscall(60, exit_code)
+}
+
+sub main {
+	var exit_code = Default_Exit_Code
+
+	var (
+		x = Initial.X
+		y = Initial.Y
+	)
+
+	if x != y {
+		exit_code = 1
+	}
+
+	process.exit(exit_code)
+}
