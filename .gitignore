@@ -1,0 +1,7 @@
+compile_commands.json
+.ccls-cache
+pl0
+test
+tests/non-zero-exit
+*.o
+*.asm

@@ -1,0 +1,3 @@
+[submodule "os-exec"]
+	path = os-exec
+	url = https://github.com/RobertBendun/os-exec.git

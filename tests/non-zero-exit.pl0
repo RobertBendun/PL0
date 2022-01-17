@@ -1,0 +1,4 @@
+// Calls exit syscall with non-zero exit value
+sub main {
+	#syscall(60, 42)
+}
