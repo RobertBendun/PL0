@@ -1,4 +1,4 @@
-sub simple_enums {
+fun simple_enums {
 	enum Direction { North, East, South, West }
 
 	assert int(Direction.North) == 0
@@ -20,14 +20,14 @@ sub simple_enums {
 	}
 }
 
-sub nested_enums {
+fun nested_enums {
 	enum Token_Kind {
 		Int
 		String
 		Identifier
 
 		Keyword {
-			Subroutine
+			Function
 			If
 			For
 		}
@@ -37,13 +37,13 @@ sub nested_enums {
 		}
 	}
 
-	var token = Token_Kind.Keyword.Subroutine
-	assert Token_Kind.as_string(token) == "Keyword.Subroutine"
-	assert Keyword.as_string(token) == "Subroutine"
+	var token = Token_Kind.Keyword.Function
+	assert Token_Kind.as_string(token) == "Keyword.Function"
+	assert Keyword.as_string(token) == "Function"
 
 	if token == .Keyword {
 		print("We got keyword of type ")
-		if token == .Subroutine {
+		if token == .Function {
 			println("subroutine")
 		} else if token == .Keyword.If {
 			println("if")

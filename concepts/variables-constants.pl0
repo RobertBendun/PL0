@@ -7,11 +7,11 @@ const Initial (
 	Y = 10 + 10
 )
 
-sub exit(exit_code) {
+fun exit(exit_code) {
 	#syscall(60, exit_code)
 }
 
-sub main {
+fun main {
 	var exit_code = Default_Exit_Code
 
 	var (
@@ -23,5 +23,5 @@ sub main {
 		exit_code = 1
 	}
 
-	process.exit(exit_code)
+	exit(exit_code)
 }

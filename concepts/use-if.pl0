@@ -1,0 +1,15 @@
+// If you want OS-specific function you can exclude one from overload resolution
+// on other operating systems with use statement
+
+fun exit(exit_code) {
+	use if OS == "linux"
+}
+
+// For specific group of declarations
+use if OS == "linux" {
+	fun exit(exit_code) {
+	}
+}
+
+// For whole file
+use if OS == "linux"

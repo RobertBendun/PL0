@@ -37,9 +37,9 @@ void ensure(bool b, auto message)
 
 enum class Keyword_Kind
 {
-	Subroutine,
+	Function,
 
-	Enum_Last = Subroutine
+	Enum_Last = Function
 };
 
 struct Keyword_Description {
@@ -48,7 +48,7 @@ struct Keyword_Description {
 };
 
 constexpr Keyword_Description Keywords_Description[] = {
-	{ Keyword_Kind::Subroutine, "sub" }
+	{ Keyword_Kind::Function, "fun" }
 };
 
 static_assert(std::size(Keywords_Description) == 1u + (size_t)Keyword_Kind::Enum_Last,
@@ -395,12 +395,12 @@ Parse_Result parse_block(std::span<Token> tokens)
 
 Parse_Result parse_function(std::span<Token> tokens)
 {
-	if (!consume(tokens, Keyword_Kind::Subroutine))
-		return Parse_Result::failure(tokens, "Function must begin with sub keyword");
+	if (!consume(tokens, Keyword_Kind::Function))
+		return Parse_Result::failure(tokens, "Function must begin with fun keyword");
 
 	auto maybe_identifier = consume(tokens, Token::Kind::Identifier);
 	if (!maybe_identifier)
-		return Parse_Result::failure(tokens, "`sub` must be followed by an indentifier");
+		return Parse_Result::failure(tokens, "`fun` must be followed by an indentifier");
 
 	return parse_block(tokens).wrap([&](Ast *ast) {
 		auto f = new Ast_Function;

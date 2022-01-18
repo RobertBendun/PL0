@@ -1,4 +1,4 @@
-sub loops_and_conditions {
+fun loops_and_conditions {
 	var i = 0
 	for i < 3 {
 		println("Condition based loop")
@@ -20,19 +20,13 @@ sub loops_and_conditions {
 }
 
 
-sub recursion {
-	sub factorial(n) {
-		return if n > 1 {
-			n * factorial(n-1)
-		} else {
-			1
-		}
-	}
+fun recursion {
+	fun factorial(n) if n > 1 { n * factorial(n-1) } else { 1 }
 
 	assert factorial(5) == 120
 }
 
-sub main {
+fun main {
 	loops_and_conditions()
 	recursion()
 }
