@@ -28,7 +28,12 @@ fs::path filename;
 
 void usage()
 {
-	fmt::print(stderr, "usage: {} <source-code>\n", compiler_name.c_str());
+	fmt::print(stderr, "usage: {} [options] <source-code>\n", compiler_name.c_str());
+	fmt::print(stderr, "  where options are:\n");
+	fmt::print(stderr, "    --graph-ir <dot-file> Writes to <dot-file> graph of IR\n");
+	fmt::print(stderr, "    --print-ast           Prints AST of whole program\n");
+	fmt::print(stderr, "    --print-ir            Prints generated Intermidiate representation\n");
+	std::exit(1);
 }
 
 void ensure(bool b, auto message)
@@ -105,6 +110,7 @@ struct Token
 	Instrinsic_Kind intrinsic;
 };
 
+// TODO Add tracking line and column of tokens
 std::vector<Token> lex(std::string_view source)
 {
 	std::vector<Token> tokens;
@@ -160,6 +166,8 @@ std::vector<Token> lex(std::string_view source)
 			ensure(false, "Unknown intrinsic `#{}`"_format(source));
 		}
 
+		// TODO Add hex (0x), octal (0o) and binary (Ob) literals.
+		// Needed for more expressive definition of some Posix constants like permissions
 		if (auto after_num = std::find_if_not(source.begin(), source.end(), [](auto ch) { return std::isdigit(ch); }); after_num != source.begin()) {
 			token.kind = Token::Kind::Integer;
 			auto [p, e] = std::from_chars(source.data(), source.data() + std::distance(source.begin(), after_num), token.ival);
@@ -219,6 +227,7 @@ struct Expression
 	Expression(Instrinsic_Kind intr) : kind(Kind::Intrinsic), intrinsic(intr) {}
 	Expression(Instrinsic_Kind intr, std::list<Expression> params) : kind(Kind::Intrinsic), intrinsic(intr), params{std::move(params)} {}
 
+	// TODO Accept output stream for allowing stderr error reporting with this function
 	void dump(unsigned indent = 0) const
 	{
 		auto const dump_params = [&] { for (auto const &p : params) p.dump(indent+2); };
@@ -374,6 +383,7 @@ struct Parser
 		return failure(tokens, "Expected expression");
 	}
 
+	// TODO Accept output stream
 	void dump()
 	{
 		for (auto const& function : all_functions) {
@@ -488,6 +498,7 @@ struct IR_Compiler
 			break;
 
 		default:
+			std::cout << "Unknown expression kind:\n";
 			expr.dump();
 			std::cout << std::flush;
 			std::exit(1);
@@ -502,6 +513,9 @@ struct IR_Compiler
 		}
 	}
 
+	// FIXME This algorithm produce misleading output. For now IR_Compiler::dump_dot is better then
+	// IR_Compiler::dump() beacuse it prints statements in creation order, not in control flow order
+	// TODO Accept output stream. Useful for error reporting on stderr, not stdout
 	void dump() const
 	{
 		for (auto const& stmt_ptr : all_statements) {
@@ -544,8 +558,9 @@ int main(int, char **argv)
 			arg.remove_prefix(1);
 			if (arg.starts_with('-')) arg.remove_prefix(1);
 
-			if (arg == "ast") { print_ast = true; continue; }
-			if (arg == "ir")  { print_ir = true;  continue; }
+			if (arg == "help") usage();
+			if (arg == "print-ast") { print_ast = true; continue; }
+			if (arg == "print-ir")  { print_ir = true;  continue; }
 
 			if (arg == "graph-ir") {
 				ensure(*++argv, "-graph-ir expects filename to put DOT graph");
@@ -588,6 +603,7 @@ int main(int, char **argv)
 		compiler.dump();
 	}
 
+	// TODO Allow specifiing path as '-' to print on stdout
 	if (!graph_ir.empty()) {
 		std::ofstream file(graph_ir.data());
 		compiler.dump_dot(file);
