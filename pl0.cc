@@ -68,7 +68,6 @@ struct Intrinsic_Description
 	std::string_view as_string;
 };
 
-
 constexpr Intrinsic_Description Intrinsic_Description[] = {
 	{ Instrinsic_Kind::Syscall, "syscall" }
 };
@@ -353,7 +352,7 @@ struct Parser
 		if (!maybe_identifier)
 			return failure(tokens, "`fun` must be followed by an indentifier");
 
-		return parse_block(tokens).then([&](Expression body) {
+		return parse_expression(tokens).then([&](Expression body) {
 			all_functions.push_back(Function { std::string(maybe_identifier->sval), std::move(body) });
 			return Expression{};
 		});

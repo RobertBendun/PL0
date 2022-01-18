@@ -1,0 +1,1 @@
+fun main #syscall(60, 40)
