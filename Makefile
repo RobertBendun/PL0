@@ -7,3 +7,7 @@ all: pl0 test
 .PHONY: clean
 clean:
 	rm -f pl0 test
+
+.PHONY: install-nvim
+install-nvim: editor/pl0.vim
+	cp $< /usr/share/nvim/runtime/syntax/
