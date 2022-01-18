@@ -679,9 +679,7 @@ int main(int, char **argv)
 	Parser parser;
 	auto parse_result = parser.parse_function({ tokens.data(), tokens.size() });
 
-	if (!parse_result) {
-		error(parse_result.error);
-	}
+	ensure(!parse_result, parse_result.error);
 
 	if (print_ast) {
 		fmt::print("--- AST DUMP -----------------------------\n");
@@ -696,9 +694,12 @@ int main(int, char **argv)
 		compiler.dump();
 	}
 
-	// TODO Allow specifiing path as '-' to print on stdout
 	if (!graph_ir.empty()) {
-		std::ofstream file(graph_ir.data());
-		compiler.dump_dot(file);
+		if (graph_ir == "-") {
+			compiler.dump_dot(std::cout);
+		} else {
+			std::ofstream file(graph_ir.data());
+			compiler.dump_dot(file);
+		}
 	}
 }
