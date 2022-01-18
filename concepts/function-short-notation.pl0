@@ -1,0 +1,12 @@
+fun twice(f, n) {
+	f(f(n))
+}
+
+fun inc(n) n + 1
+
+fun main {
+	assert 12 == twice(inc, 10)
+	assert 12 == twice(fun (n) n + 1, 10)
+	assert 12 == twice(fun (n) { n + 1 }, 10)
+	assert 12 == twice(fun (n) { return n + 1 }, 10)
+}
