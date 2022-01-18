@@ -1,0 +1,4 @@
+fun main {
+	// exit(getuid())
+	#syscall(60, #syscall(102))
+}

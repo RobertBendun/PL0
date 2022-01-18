@@ -10,6 +10,7 @@
 #include <optional>
 #include <span>
 #include <variant>
+#include <map>
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
@@ -273,7 +274,6 @@ struct Parser
 
 		operator bool() const { return error.empty(); }
 		Result then(auto callable) && { if (*this) return success(callable(std::move(expr)), remaining); return *this; }
-
 	};
 
 	static Result success(Expression e, std::span<Token> remaining) { return { std::move(e), remaining }; }
@@ -293,7 +293,7 @@ struct Parser
 		Expression p;
 
 		for (;;) {
-			if (auto value = parse_value(tokens); value) {
+			if (auto value = parse_expression(tokens); value) {
 				p.params.push_back(value.expr);
 				tokens = value.remaining;
 				if (consume(tokens, Token::Kind::Comma))
@@ -359,6 +359,22 @@ struct Parser
 		});
 	}
 
+	Result parse_expression(std::span<Token> tokens)
+	{
+		std::function<Parser::Result(Parser &, std::span<Token>)> funcs[] = {
+			&Parser::parse_intrinsic,
+			&Parser::parse_block,
+			&Parser::parse_value,
+			&Parser::parse_function
+		};
+
+		for (auto func : funcs) {
+			if (auto result = func(*this, tokens); result)
+				return result;
+		}
+		return failure(tokens, "Expected expression");
+	}
+
 	void dump()
 	{
 		for (auto const& function : all_functions) {
@@ -369,9 +385,152 @@ struct Parser
 	}
 };
 
+struct Statement
+{
+	using Reg = uint64_t;
+	static constexpr auto Empty = std::numeric_limits<Reg>::max();
+
+	enum class Kind
+	{
+		Nop,
+		Copy,     // Copy into IR variable other variable or initialize with value
+		Syscall,  // p0 = syscall(syscall_number = p1, arg1 = p2, arg2 = p3, ...)
+	};
+
+	Kind kind;
+	uint64_t value;                    // value for copy statement
+	std::vector<Reg> params{};         // IR variables referenced by statement
+	Statement *next = nullptr;         // aka true branch
+	Statement *false_branch = nullptr; // aka false branch
+
+	std::string string() const
+	{
+		switch (kind) {
+		case Statement::Kind::Nop:
+			return "NOP";
+
+		case Statement::Kind::Copy:
+			return params.size() == 1
+				? "COPY ${}, {}"_format(params.front(), value)
+				: "COPY ${}, ${}"_format(params[0], params[1]);
+
+		case Statement::Kind::Syscall:
+			auto str = "SYSCALL RET=${} ID=${} "_format(params[0], params[1]);
+			if (params.size() > 2) str += "ARGS=";
+			for (auto i = 2u; i < params.size(); ++i)
+				str += "${} "_format(params[i]);
+			return str;
+		}
+
+		assert(false && "unreachable");
+	}
+};
+
+struct IR_Compiler
+{
+	std::vector<std::unique_ptr<Statement>> all_statements;
+	std::map<std::string, Statement*> entry_points;
+
+	Statement* new_statement() { return all_statements.emplace_back(std::make_unique<Statement>()).get(); }
+
+	struct Context
+	{
+		Statement **target;       // place where to put next statement
+		Statement::Reg counter{}; // counter for creation of new IR variables
+	};
+
+	// Compiles pice of Expression and returns variable if result of expression is needed
+	Statement::Reg compile(Expression const& expr, Context &ctx)
+	{
+		// Make new IR variable
+		auto make = [&]               { return ctx.counter++; };
+		// Put statement at ctx.target and iterate target to the last statement
+		auto put  = [&](Statement *s) { for (*ctx.target = s; s; s = *ctx.target) ctx.target = &s->next; };
+
+		switch (expr.kind) {
+		case Expression::Kind::Integer:
+			{
+				auto stmt = new_statement();
+				stmt->kind = Statement::Kind::Copy;
+				stmt->params.push_back(make());
+				stmt->value = expr.ival;
+				put(stmt);
+				return stmt->params.front();
+			}
+			break;
+
+		case Expression::Kind::Sequence:
+			{
+				auto result = Statement::Empty;
+				// Evaluate each and only keep last value
+				for (auto const& param : expr.params) result = compile(param, ctx);
+				return result;
+			}
+			break;
+
+		case Expression::Kind::Intrinsic:
+			{
+				switch (expr.intrinsic) {
+				case Instrinsic_Kind::Syscall:
+					{
+						auto stmt = new_statement();
+						stmt->kind = Statement::Kind::Syscall;
+						stmt->params.push_back(make()); // Create return variable
+						for (auto const& param : expr.params) stmt->params.push_back(compile(param, ctx));
+						put(stmt);
+						return stmt->params.front();
+					}
+					break;
+
+				default:
+					assert(false && "unimplemented intrinsic compilation");
+				}
+			}
+			break;
+
+		default:
+			expr.dump();
+			std::cout << std::flush;
+			std::exit(1);
+		}
+	}
+
+	void compile(Parser const& parser)
+	{
+		for (auto const& function : parser.all_functions) {
+			Context ctx { &entry_points[function.name] };
+			compile(function.body, ctx);
+		}
+	}
+
+	void dump() const
+	{
+		for (auto const& stmt_ptr : all_statements) {
+			auto stmt = stmt_ptr.get();
+			if (auto match = std::find_if(entry_points.begin(), entry_points.end(), [&](auto const& kv) { return kv.second == stmt; }); match != entry_points.end()) {
+				fmt::print("{}:\n", match->first);
+			}
+			fmt::print("  {}\n", stmt->string());
+		}
+	}
+
+	void dump_dot(std::ostream &out) const
+	{
+		fmt::print(out, "digraph Program {{\n");
+		for (auto const& stmt : all_statements) {
+			fmt::print(out, "Node_{} [label={}];\n", (void*)stmt.get(), std::quoted(stmt->string()));
+			if (stmt->next)
+				fmt::print(out, "Node_{} -> Node_{};\n", (void*)stmt.get(), (void*)stmt->next);
+		}
+		fmt::print(out, "}}\n");
+	}
+};
+
 int main(int, char **argv)
 {
 	bool print_ast = false;
+	bool print_ir = false;
+	std::string_view graph_ir;
 
 	assert(*argv);
 	compiler_name = fs::path(*argv++).filename();
@@ -384,7 +543,16 @@ int main(int, char **argv)
 
 		if (arg.starts_with('-')) {
 			arg.remove_prefix(1);
+			if (arg.starts_with('-')) arg.remove_prefix(1);
+
 			if (arg == "ast") { print_ast = true; continue; }
+			if (arg == "ir")  { print_ir = true;  continue; }
+
+			if (arg == "graph-ir") {
+				ensure(*++argv, "-graph-ir expects filename to put DOT graph");
+				graph_ir = *argv;
+				continue;
+			}
 			ensure(false, "Unrecognized command line option: {}"_format(arg));
 		}
 
@@ -408,6 +576,21 @@ int main(int, char **argv)
 		ensure(false, parse_result.error);
 	}
 
-	if (print_ast)
+	if (print_ast) {
+		fmt::print("--- AST DUMP -----------------------------\n");
 		parser.dump();
+	}
+
+	IR_Compiler compiler;
+	compiler.compile(parser);
+
+	if (print_ir) {
+		fmt::print("--- INTERMIDIATE REPRESENTATION ----------\n");
+		compiler.dump();
+	}
+
+	if (!graph_ir.empty()) {
+		std::ofstream file(graph_ir.data());
+		compiler.dump_dot(file);
+	}
 }

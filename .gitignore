@@ -5,3 +5,5 @@ test
 tests/non-zero-exit
 *.o
 *.asm
+*.dot
+*.svg
