@@ -6,8 +6,10 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <list>
 #include <optional>
 #include <span>
+#include <variant>
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
@@ -72,6 +74,11 @@ constexpr Intrinsic_Description Intrinsic_Description[] = {
 
 static_assert(std::size(Keywords_Description) == 1u + (size_t)Keyword_Kind::Enum_Last,
 	"Exhaustive keyword to string matching");
+
+std::string_view intrinsic_name(Instrinsic_Kind kind)
+{
+	return std::find_if(Intrinsic_Description, std::end(Intrinsic_Description), [=](auto const& x) { return x.kind == kind; })->as_string;
+}
 
 struct Token
 {
@@ -188,113 +195,50 @@ lex_next_keyword:
 	return tokens;
 }
 
-struct Ast
+// AST Node that describes anything computable (binary expressions, values, function calls)
+struct Expression
 {
-	virtual ~Ast() = default;
-	virtual void dump(size_t indent) = 0;
-};
-
-struct Ast_Function final : Ast
-{
-	~Ast_Function() override = default;
-
-	void dump(size_t indent) override
+	enum class Kind
 	{
-		fmt::print("{}Function {}\n", std::string(indent, ' '), name);
-		body->dump(indent + 2);
-	}
+		Empty, Integer, // atoms
+		Sequence, // blocks
+		Function_Call, // p0(p1, p2, ...)
+		Intrinsic
+	};
 
-	std::string_view name;
-	Ast *body = nullptr;
-};
-
-struct Ast_Value final : Ast
-{
-	~Ast_Value() override = default;
-
-	void dump(size_t indent) override
-	{
-		fmt::print("{}Value {}\n", std::string(indent, ' '), ival);
-	}
-
+	Kind kind;
 	uint64_t ival;
-};
+	Instrinsic_Kind intrinsic;
+	std::list<Expression> params;
 
-struct Ast_Block final : Ast, std::vector<Ast*>
-{
-	~Ast_Block() override = default;
+	template<typename ...T>
+	Expression(Kind k, T&& ...args) : kind(k), params{std::forward<T>(args)...} {}
 
-	void dump(size_t indent) override
+	Expression() : kind(Kind::Empty) {}
+	Expression(uint64_t val) : kind(Kind::Integer), ival(val) {}
+	Expression(Instrinsic_Kind intr) : kind(Kind::Intrinsic), intrinsic(intr) {}
+	Expression(Instrinsic_Kind intr, std::list<Expression> params) : kind(Kind::Intrinsic), intrinsic(intr), params{std::move(params)} {}
+
+	void dump(unsigned indent = 0) const
 	{
-		fmt::print("{}{{\n", std::string(indent, ' '));
-		for (auto ast : *this)
-			ast->dump(indent+2);
-		fmt::print("{}}}\n", std::string(indent, ' '));
-	}
-};
+		auto const dump_params = [&] { for (auto const &p : params) p.dump(indent+2); };
 
-struct Ast_Call_Params final : Ast, std::vector<Ast*>
-{
-	~Ast_Call_Params() override = default;
-
-	void dump(size_t indent) override
-	{
-		fmt::print("{}(\n", std::string(indent, ' '));
-		for (auto ast : *this)
-			ast->dump(indent+2);
-		fmt::print("{})\n", std::string(indent, ' '));
-	}
-};
-
-struct Ast_Intrinsic final : Ast
-{
-	~Ast_Intrinsic() override = default;
-
-	Instrinsic_Kind kind;
-	Ast *body = nullptr;
-
-	void dump(size_t indent) override
-	{
 		fmt::print("{}", std::string(indent, ' '));
 		switch (kind) {
-		case Instrinsic_Kind::Syscall: fmt::print("syscall\n"); body->dump(indent+2); break;
+		case Kind::Empty:         fmt::print("NOP\n");                break;
+		case Kind::Integer:       fmt::print("INT {}\n", ival);       break;
+		case Kind::Function_Call: fmt::print("FCALL\n");                                   dump_params(); break;
+		case Kind::Intrinsic:     fmt::print("INTRINSIC {}\n", intrinsic_name(intrinsic)); dump_params(); break;
+		case Kind::Sequence:      fmt::print("SEQ\n");                                     dump_params(); break;
 		}
-	}
-
-	auto& params()
-	{
-		assert(body);
-		return *(Ast_Call_Params*)body;
 	}
 };
 
-struct Parse_Result
+// AST Node which represents definition of functions
+struct Function
 {
-	Ast *ast = nullptr;
-	std::span<Token> remaining{};
-	std::string error{};
-
-	static Parse_Result success(Ast *ast, std::span<Token> remaining)
-	{
-		return Parse_Result { ast, remaining };
-	}
-
-	static Parse_Result failure(std::span<Token> remaining, std::string error)
-	{
-		return Parse_Result { nullptr, remaining, std::move(error) };
-	}
-
-	operator bool() const
-	{
-		return ast != nullptr;
-	}
-
-	Parse_Result wrap(auto callable) &&
-	{
-		if (ast)
-			ast = callable(ast);
-		return *this;
-	}
+	std::string name;
+	Expression body;
 };
 
 bool expect(std::span<Token> tokens, Token::Kind kind)
@@ -317,193 +261,116 @@ std::optional<Token> consume(std::span<Token> &tokens, auto ...args)
 	return {};
 }
 
-Parse_Result parse_value(std::span<Token> tokens)
+struct Parser
 {
-	auto maybe_int = consume(tokens, Token::Kind::Integer);
-	if (maybe_int) {
-		auto val = new Ast_Value;
-		val->ival = maybe_int->ival;
-		return Parse_Result::success(val, tokens);
-	}
+	std::vector<Function> all_functions;
 
-	return Parse_Result::failure(tokens, "Expected integer value");
-}
-
-Parse_Result parse_call_params(std::span<Token> tokens)
-{
-	if (!consume(tokens, Token::Kind::Open_Paren))
-		return Parse_Result::failure(tokens, "Call expression parameters must begin with (");
-
-	auto params = new Ast_Call_Params;
-
-	for (;;) {
-		if (auto value = parse_value(tokens); value) {
-			params->push_back(value.ast);
-			tokens = value.remaining;
-			if (consume(tokens, Token::Kind::Comma))
-				continue;
-			else if (consume(tokens, Token::Kind::Close_Paren))
-				break;
-			else
-				return Parse_Result::failure(tokens, "Expected either , or )");
-		} else if (consume(tokens, Token::Kind::Close_Paren)) {
-			break;
-		} else {
-			return value;
-		}
-	}
-
-	return Parse_Result::success(params, tokens);
-}
-
-Parse_Result parse_intrinsic(std::span<Token> tokens)
-{
-	auto intr = consume(tokens, Token::Kind::Intrinsic);
-	if (!intr)
-		return Parse_Result::failure(tokens, "Intrinsic expression must begin with intrinsic token");
-
-	switch (intr->intrinsic) {
-	case Instrinsic_Kind::Syscall:
-		return parse_call_params(tokens).wrap([](Ast *ast){
-			auto p = new Ast_Intrinsic;
-			p->body = ast;
-			p->kind = Instrinsic_Kind::Syscall;
-			return p;
-		});
-
-	default:
-		assert(false && "Parsing this intrinsic kind unimplemented yet");
-	}
-}
-
-Parse_Result parse_block(std::span<Token> tokens)
-{
-	if (!consume(tokens, Token::Kind::Open_Block))
-		return Parse_Result::failure(tokens, "Block must begin with {");
-
-	auto block = parse_intrinsic(tokens).wrap([](Ast *ast) {
-		auto block = new Ast_Block;
-		block->push_back(ast);
-		return block;
-	});
-
-	if (!consume(block.remaining, Token::Kind::Close_Block))
-		return Parse_Result::failure(tokens, "Block must end with }");
-
-	return block;
-}
-
-Parse_Result parse_function(std::span<Token> tokens)
-{
-	if (!consume(tokens, Keyword_Kind::Function))
-		return Parse_Result::failure(tokens, "Function must begin with fun keyword");
-
-	auto maybe_identifier = consume(tokens, Token::Kind::Identifier);
-	if (!maybe_identifier)
-		return Parse_Result::failure(tokens, "`fun` must be followed by an indentifier");
-
-	return parse_block(tokens).wrap([&](Ast *ast) {
-		auto f = new Ast_Function;
-		f->name = maybe_identifier->sval;
-		f->body = ast;
-		return f;
-	});
-}
-
-struct Operation
-{
-	enum class Kind
+	struct Result
 	{
-		Syscall,
-		Push_Int
+		Expression expr;
+		std::span<Token> remaining{};
+		std::string error{};
+
+		operator bool() const { return error.empty(); }
+		Result then(auto callable) && { if (*this) return success(callable(std::move(expr)), remaining); return *this; }
+
 	};
 
-	static Operation push_int(unsigned ival) { Operation op; op.kind = Kind::Push_Int; op.ival = ival; return op; }
-	static Operation syscall(unsigned params_count) { Operation op; op.kind = Kind::Syscall; op.syscall_params_count = params_count; return op; }
+	static Result success(Expression e, std::span<Token> remaining) { return { std::move(e), remaining }; }
+	static Result failure(std::span<Token> remaining, std::string error) { return { {}, remaining, std::move(error) }; }
 
-	Kind kind;
-	uint64_t ival;
-	unsigned syscall_params_count;
-};
-
-std::vector<Operation> to_intermidiate(Ast *ast)
-{
-	if (ast == nullptr)
-		return {};
-
-	if (auto func = dynamic_cast<Ast_Function*>(ast)) {
-		ensure(func->name == "main", "Only main function is currently supported");
-		return to_intermidiate(func->body);
+	Parser::Result parse_value(std::span<Token> tokens)
+	{
+		auto maybe_int = consume(tokens, Token::Kind::Integer);
+		return maybe_int ? success(Expression(maybe_int->ival), tokens) : failure(tokens, "Expected integer value");
 	}
 
-	if (auto block = dynamic_cast<Ast_Block*>(ast)) {
-		std::vector<Operation> flat;
-		for (auto stmt : *block) {
-			auto ops = to_intermidiate(stmt);
-			std::move(ops.begin(), ops.end(), std::back_inserter(flat));
-		}
-		return flat;
-	}
+	Result parse_call_params(std::span<Token> tokens)
+	{
+		if (!consume(tokens, Token::Kind::Open_Paren))
+			return failure(tokens, "Call expression parameters must begin with (");
 
-	if (auto intr = dynamic_cast<Ast_Intrinsic*>(ast)) {
-		switch (intr->kind) {
-		case Instrinsic_Kind::Syscall:
-			auto params = to_intermidiate(intr->body);
-			params.push_back(Operation::syscall(intr->params().size()-1));
-			return params;
-		}
-	}
+		Expression p;
 
-	if (auto params = dynamic_cast<Ast_Call_Params*>(ast)) {
-		std::vector<Operation> flat;
-		for (auto stmt : *params) {
-			auto ops = to_intermidiate(stmt);
-			std::move(ops.begin(), ops.end(), std::back_inserter(flat));
-		}
-		return flat;
-	}
-
-	if (auto value = dynamic_cast<Ast_Value*>(ast)) {
-		return { Operation::push_int(value->ival) };
-	}
-
-	assert(false && "unimplemented to intermidiate conversion");
-}
-
-void compile_linux_x86_64(std::ostream &out, std::span<Operation> ops)
-{
-	fmt::print(out, "BITS 64\n");
-	fmt::print(out, "segment .text\n");
-	fmt::print(out, "global _start\n");
-	fmt::print(out, "_start:\n");
-
-	for (auto op : ops) {
-		switch (op.kind) {
-		case Operation::Kind::Push_Int:
-			fmt::print(out, "  mov rax, {}\n", op.ival);
-			fmt::print(out, "  push rax\n");
-			break;
-
-		case Operation::Kind::Syscall:
-			{
-				static char const* regs[] = { "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9" };
-				for (unsigned i = op.syscall_params_count; i <= op.syscall_params_count; --i)
-					fmt::print(out, "  pop {}\n", regs[i]);
-				fmt::print(out, "  syscall\n");
-				fmt::print(out, "  push rax\n");
+		for (;;) {
+			if (auto value = parse_value(tokens); value) {
+				p.params.push_back(value.expr);
+				tokens = value.remaining;
+				if (consume(tokens, Token::Kind::Comma))
+					continue;
+				else if (consume(tokens, Token::Kind::Close_Paren))
+					break;
+				else
+					return failure(tokens, "Expected either , or )");
+			} else if (consume(tokens, Token::Kind::Close_Paren)) {
+				break;
+			} else {
+				return value;
 			}
-			break;
+		}
+
+		return success(p, tokens);
+	}
+
+	auto parse_intrinsic(std::span<Token> tokens)
+	{
+		auto intr = consume(tokens, Token::Kind::Intrinsic);
+		if (!intr)
+			return failure(tokens, "Intrinsic expression must begin with intrinsic token");
+
+		switch (intr->intrinsic) {
+		case Instrinsic_Kind::Syscall:
+			return parse_call_params(tokens).then([](Expression expr) {
+				return Expression(Instrinsic_Kind::Syscall, expr.params);
+			});
+
+		default:
+			assert(false && "Parsing this intrinsic kind unimplemented yet");
 		}
 	}
 
-	fmt::print(out, "  mov rax, 60\n");
-	fmt::print(out, "  mov rdi, 0\n");
-	fmt::print(out, "  syscall\n");
-}
+	Result parse_block(std::span<Token> tokens)
+	{
+		if (!consume(tokens, Token::Kind::Open_Block))
+			return failure(tokens, "Block must begin with {");
+
+		auto block = parse_intrinsic(tokens).then([](Expression expr) {
+			return Expression(Expression::Kind::Sequence, expr);
+		});
+
+		if (!consume(block.remaining, Token::Kind::Close_Block))
+			return failure(tokens, "Block must end with }");
+
+		return block;
+	}
+
+	Result parse_function(std::span<Token> tokens)
+	{
+		if (!consume(tokens, Keyword_Kind::Function))
+			return failure(tokens, "Function must begin with fun keyword");
+
+		auto maybe_identifier = consume(tokens, Token::Kind::Identifier);
+		if (!maybe_identifier)
+			return failure(tokens, "`fun` must be followed by an indentifier");
+
+		return parse_block(tokens).then([&](Expression body) {
+			all_functions.push_back(Function { std::string(maybe_identifier->sval), std::move(body) });
+			return Expression{};
+		});
+	}
+
+	void dump()
+	{
+		for (auto const& function : all_functions) {
+			fmt::print("FUNCTION {}\n", function.name);
+			function.body.dump();
+			fmt::print("END FUNCTION {}\n", function.name);
+		}
+	}
+};
 
 int main(int, char **argv)
 {
-	bool print_tokens = false;
 	bool print_ast = false;
 
 	assert(*argv);
@@ -517,9 +384,7 @@ int main(int, char **argv)
 
 		if (arg.starts_with('-')) {
 			arg.remove_prefix(1);
-			if (arg.starts_with("ast")) { print_ast = true; continue; }
-			if (arg.starts_with("tokens")) { print_tokens = true; continue; }
-
+			if (arg == "ast") { print_ast = true; continue; }
 			ensure(false, "Unrecognized command line option: {}"_format(arg));
 		}
 
@@ -536,71 +401,13 @@ int main(int, char **argv)
 
 	auto tokens = lex(source);
 
-	if (print_tokens) {
-		for (auto token : tokens) {
-			fmt::print("TOK ");
-			switch (token.kind) {
-			case Token::Kind::Open_Block:  fmt::print("{{"); break;
-			case Token::Kind::Close_Block: fmt::print("}}"); break;
-			case Token::Kind::Open_Paren:  fmt::print("("); break;
-			case Token::Kind::Close_Paren: fmt::print(")"); break;
-			case Token::Kind::Comma:       fmt::print(","); break;
-
-			case Token::Kind::Identifier: fmt::print("Identifier {}", std::quoted(token.sval)); break;
-			case Token::Kind::Integer: fmt::print("Int {}", token.ival); break;
-			case Token::Kind::Intrinsic:
-				{
-					for (auto intr : Intrinsic_Description) {
-						if (intr.kind == token.intrinsic) {
-							fmt::print("Intrinsic {}", intr.as_string);
-							break;
-						}
-					}
-				}
-				break;
-			case Token::Kind::Keyword:
-				{
-					for (auto keyword : Keywords_Description) {
-						if (keyword.kind == token.keyword) {
-							fmt::print("Keyword {}", keyword.as_string);
-							break;
-						}
-					}
-				}
-				break;
-			default:
-				fmt::print("Unknown token kind\n");
-			}
-			fmt::print("\n");
-		}
-	}
-
-	auto parse_result = parse_function({ tokens.data(), tokens.size() });
+	Parser parser;
+	auto parse_result = parser.parse_function({ tokens.data(), tokens.size() });
 
 	if (!parse_result) {
 		ensure(false, parse_result.error);
 	}
 
-	if (print_ast) {
-		parse_result.ast->dump(0);
-	}
-
-	auto intermidiate = to_intermidiate(parse_result.ast);
-
-	fs::path asm_path = filename;
-	asm_path = asm_path.replace_extension("asm");
-
-	fs::path object_path = filename;
-	object_path = object_path.replace_extension("o");
-
-	fs::path executable_path = filename;
-	executable_path = executable_path.replace_extension();
-
-	{
-		std::ofstream asm_file(asm_path);
-		compile_linux_x86_64(asm_file, intermidiate);
-	}
-
-	if (os_exec::run("nasm", "-felf64", asm_path)) return 1;
-	if (os_exec::run("ld", "-o", executable_path, object_path)) return 1;
+	if (print_ast)
+		parser.dump();
 }
