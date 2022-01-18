@@ -1,21 +1,31 @@
 #include <algorithm>
 #include <cassert>
 #include <charconv>
+#include <concepts>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <list>
+#include <map>
 #include <optional>
 #include <span>
 #include <variant>
-#include <map>
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
 
 #include "./os-exec/os-exec.hh"
+
+// Hack for using std::source_location
+#ifndef __cpp_lib_source_location
+#include <experimental/source_location>
+using std::experimental::source_location;
+#else
+#include <source_location>
+using std::source_location;
+#endif
 
 using namespace fmt::literals;
 using namespace std::string_view_literals;
@@ -36,11 +46,76 @@ void usage()
 	std::exit(1);
 }
 
+struct Position
+{
+	std::string_view file = "<unknown>";
+	unsigned line = 1, column = 1, offset = 0;
+
+	void next_line(unsigned n, unsigned diff) { line += n; column = 1; offset += diff; }
+
+	// Conform to the output_iterator interface for ease of moving pointed position
+	auto& operator*() { return *this; }
+	auto& operator++() { return *this; }
+	void operator=(char c) { switch (c) { case '\n': ++line; [[fallthrough]]; case '\r': column = 1; break; default: ++column; }; ++offset; }
+	void operator+=(char c) { *this = c; }
+};
+
+template<> struct fmt::formatter<Position> : fmt::formatter<std::string_view>
+{
+	auto format(Position const& pos, auto &ctx) -> decltype(ctx.out())
+	{
+		return fmt::format_to(ctx.out(), "{}:{}:{}", pos.file, pos.line, pos.column);
+	}
+};
+
 void ensure(bool b, auto message)
 {
 	if (b) return;
 	fmt::print(stderr, "{}: error: {}\n", compiler_name.c_str(), message);
 	std::exit(1);
+}
+
+void ensure(bool b, Position const& pos, auto const& message)
+{
+	if (b) return;
+	fmt::print(stderr, "{}: error: {}\n", pos, message);
+	std::exit(1);
+}
+
+[[noreturn]]
+inline void fatal(std::string type, std::string why, source_location loc = source_location::current())
+{
+	fmt::print(stderr, "{}:{}:{}: {}", loc.file_name(), loc.line(), loc.column(), type);
+	if (!why.empty()) {
+		fmt::print(stderr, ": {}\n", why);
+	} else {
+		fmt::print(stderr, "\n");
+	}
+	std::exit(1);
+}
+
+[[noreturn]]
+void unimplemented(std::string why = {}, source_location loc = source_location::current())
+{
+	fatal("unimplemented", why, loc);
+}
+
+[[noreturn]]
+void unreachable(std::string why = {}, source_location loc = source_location::current())
+{
+	fatal("unreachable", why, loc);
+}
+
+template<typename T>
+requires requires (T const& t) { { t.pos } -> std::convertible_to<Position>; }
+void ensure(bool b, T const& with_pos_field, auto const& message)
+{
+	ensure(b, with_pos_field.pos, message);
+}
+
+void error(auto const& ...params)
+{
+	ensure(false, params...);
 }
 
 enum class Keyword_Kind
@@ -104,6 +179,7 @@ struct Token
 	};
 
 	Kind kind;
+	Position pos;
 	uint64_t ival;
 	std::string_view sval;
 	Keyword_Kind keyword;
@@ -111,25 +187,30 @@ struct Token
 };
 
 // TODO Add tracking line and column of tokens
-std::vector<Token> lex(std::string_view source)
+std::vector<Token> lex(std::string_view source, std::string_view path)
 {
 	std::vector<Token> tokens;
+	Position pos;
+	pos.file = path;
 
 	while (!source.empty()) {
 		while (!source.empty()) {
 			if (auto after_ws = source.find_first_not_of(" \n\r\t\v\f"); after_ws != 0) {
-				if (after_ws != std::string_view::npos)
+				if (after_ws != std::string_view::npos) {
+					pos = std::copy(source.begin(), source.begin() + after_ws, pos);
 					source.remove_prefix(after_ws);
-				else
+				} else
 					source = {};
 				continue;
 			}
 
 			if (source.starts_with("//") || source.starts_with("#!")) {
-				if (auto eol = source.find_first_of('\n'); eol != std::string_view::npos)
+				if (auto eol = source.find_first_of('\n'); eol != std::string_view::npos) {
+					pos.next_line(1, eol);
 					source.remove_prefix(eol);
-				else
+				} else {
 					source = {};
+				}
 				continue;
 			}
 
@@ -139,7 +220,9 @@ std::vector<Token> lex(std::string_view source)
 		if (source.empty())
 			break;
 
+		auto start_source = source;
 		auto &token = tokens.emplace_back();
+		token.pos = pos;
 
 		for (auto keyword : Keywords_Description) {
 			if (source.starts_with(keyword.as_string)) {
@@ -161,9 +244,9 @@ std::vector<Token> lex(std::string_view source)
 				}
 			}
 
-			auto res = std::find_if_not(source.begin(), source.end(), [](auto ch) { return std::isalpha(ch); });
+			auto res = std::find_if_not(source.begin(), source.end(), [](auto ch) { return std::isalpha(ch) || ch == '_'; });
 			source = { source.begin(), res };
-			ensure(false, "Unknown intrinsic `#{}`"_format(source));
+			error(pos, fmt::format("Unknown intrinsic `#{}`", source));
 		}
 
 		// TODO Add hex (0x), octal (0o) and binary (Ob) literals.
@@ -195,9 +278,9 @@ std::vector<Token> lex(std::string_view source)
 		case ',': source.remove_prefix(1); token.kind = Token::Kind::Comma;       goto lex_next_keyword;
 		}
 
-		ensure(false, "Unexpected sequence: {}"_format(std::quoted(source)));
+		error(pos, fmt::format("Unexpected sequence: {}", std::quoted(source)));
 lex_next_keyword:
-		;
+		pos = std::copy(start_source.data(), source.data(), pos);
 	}
 
 	return tokens;
@@ -214,10 +297,11 @@ struct Expression
 		Intrinsic
 	};
 
-	Kind kind;
-	uint64_t ival;
-	Instrinsic_Kind intrinsic;
-	std::list<Expression> params;
+	Kind kind = Kind::Empty;
+	Position pos{};
+	uint64_t ival{};
+	Instrinsic_Kind intrinsic{};
+	std::list<Expression> params{};
 
 	template<typename ...T>
 	Expression(Kind k, T&& ...args) : kind(k), params{std::forward<T>(args)...} {}
@@ -226,6 +310,8 @@ struct Expression
 	Expression(uint64_t val) : kind(Kind::Integer), ival(val) {}
 	Expression(Instrinsic_Kind intr) : kind(Kind::Intrinsic), intrinsic(intr) {}
 	Expression(Instrinsic_Kind intr, std::list<Expression> params) : kind(Kind::Intrinsic), intrinsic(intr), params{std::move(params)} {}
+
+	decltype(auto) operator+(Position pos) && { this->pos = pos; return std::move(*this); }
 
 	// TODO Accept output stream for allowing stderr error reporting with this function
 	void dump(unsigned indent = 0) const
@@ -248,6 +334,7 @@ struct Function
 {
 	std::string name;
 	Expression body;
+	Position pos;
 };
 
 bool expect(std::span<Token> tokens, Token::Kind kind)
@@ -290,7 +377,9 @@ struct Parser
 	Parser::Result parse_value(std::span<Token> tokens)
 	{
 		auto maybe_int = consume(tokens, Token::Kind::Integer);
-		return maybe_int ? success(Expression(maybe_int->ival), tokens) : failure(tokens, "Expected integer value");
+		return maybe_int
+			? success(Expression(maybe_int->ival) + maybe_int->pos, tokens)
+			: failure(tokens, "Expected integer value");
 	}
 
 	Result parse_call_params(std::span<Token> tokens)
@@ -299,7 +388,6 @@ struct Parser
 			return failure(tokens, "Call expression parameters must begin with (");
 
 		Expression p;
-
 		for (;;) {
 			if (auto value = parse_expression(tokens); value) {
 				p.params.push_back(value.expr);
@@ -313,11 +401,12 @@ struct Parser
 			} else if (consume(tokens, Token::Kind::Close_Paren)) {
 				break;
 			} else {
-				return value;
+				return value; // Value is in failure state here
 			}
 		}
-
-		return success(p, tokens);
+		return p.params.empty()
+			? success(std::move(p), tokens)
+			: success(std::move(p) + p.params.front().pos, tokens);
 	}
 
 	auto parse_intrinsic(std::span<Token> tokens)
@@ -328,8 +417,10 @@ struct Parser
 
 		switch (intr->intrinsic) {
 		case Instrinsic_Kind::Syscall:
-			return parse_call_params(tokens).then([](Expression expr) {
-				return Expression(Instrinsic_Kind::Syscall, expr.params);
+			return parse_call_params(tokens).then([&](Expression expr) {
+				// TODO Ensure that there is at least one parameter. `#syscall()` is not allowed
+				ensure(expr.params.size() >= 1, intr->pos, "#syscall requires at least one parameter (syscall number)");
+				return Expression(Instrinsic_Kind::Syscall, expr.params) + intr->pos;
 			});
 
 		default:
@@ -339,11 +430,12 @@ struct Parser
 
 	Result parse_block(std::span<Token> tokens)
 	{
-		if (!consume(tokens, Token::Kind::Open_Block))
+		auto const maybe_open_block = consume(tokens, Token::Kind::Open_Block);
+		if (!maybe_open_block)
 			return failure(tokens, "Block must begin with {");
 
-		auto block = parse_intrinsic(tokens).then([](Expression expr) {
-			return Expression(Expression::Kind::Sequence, expr);
+		auto block = parse_intrinsic(tokens).then([&](Expression expr) {
+			return Expression(Expression::Kind::Sequence, expr) + maybe_open_block->pos;
 		});
 
 		if (!consume(block.remaining, Token::Kind::Close_Block))
@@ -354,7 +446,8 @@ struct Parser
 
 	Result parse_function(std::span<Token> tokens)
 	{
-		if (!consume(tokens, Keyword_Kind::Function))
+		auto maybe_function_keyword = consume(tokens, Keyword_Kind::Function);
+		if (!maybe_function_keyword)
 			return failure(tokens, "Function must begin with fun keyword");
 
 		auto maybe_identifier = consume(tokens, Token::Kind::Identifier);
@@ -362,8 +455,8 @@ struct Parser
 			return failure(tokens, "`fun` must be followed by an indentifier");
 
 		return parse_expression(tokens).then([&](Expression body) {
-			all_functions.push_back(Function { std::string(maybe_identifier->sval), std::move(body) });
-			return Expression{};
+			all_functions.push_back(Function { std::string(maybe_identifier->sval), std::move(body), maybe_function_keyword->pos });
+			return Expression{} + maybe_function_keyword->pos;
 		});
 	}
 
@@ -387,7 +480,7 @@ struct Parser
 	void dump()
 	{
 		for (auto const& function : all_functions) {
-			fmt::print("FUNCTION {}\n", function.name);
+			fmt::print("FUNCTION {} {}\n", function.name, function.pos);
 			function.body.dump();
 			fmt::print("END FUNCTION {}\n", function.name);
 		}
@@ -420,18 +513,18 @@ struct Statement
 
 		case Statement::Kind::Copy:
 			return params.size() == 1
-				? "COPY ${}, {}"_format(params.front(), value)
-				: "COPY ${}, ${}"_format(params[0], params[1]);
+				? fmt::format("COPY ${}, {}", params.front(), value)
+				: fmt::format("COPY ${}, ${}", params[0], params[1]);
 
 		case Statement::Kind::Syscall:
-			auto str = "SYSCALL RET=${} ID=${} "_format(params[0], params[1]);
+			auto str = fmt::format("SYSCALL RET=${} ID=${} ", params[0], params[1]);
 			if (params.size() > 2) str += "ARGS=";
 			for (auto i = 2u; i < params.size(); ++i)
-				str += "${} "_format(params[i]);
+				str += fmt::format("${} ", params[i]);
 			return str;
 		}
 
-		assert(false && "unreachable");
+		unreachable();
 	}
 };
 
@@ -492,7 +585,7 @@ struct IR_Compiler
 					break;
 
 				default:
-					assert(false && "unimplemented intrinsic compilation");
+					unimplemented(fmt::format("intrinsic `{}`", intrinsic_name(expr.intrinsic)));
 				}
 			}
 			break;
@@ -567,7 +660,7 @@ int main(int, char **argv)
 				graph_ir = *argv;
 				continue;
 			}
-			ensure(false, "Unrecognized command line option: {}"_format(arg));
+			error(fmt::format("Unrecognized command line option: {}", arg));
 		}
 
 		ensure(filename.empty(), "Only one filename can be specified");
@@ -577,17 +670,17 @@ int main(int, char **argv)
 	ensure(!filename.empty(), "Source file was not specified");
 
 	std::ifstream source_file(filename);
-	ensure(bool(source_file), "Couldn't open source file {}"_format(filename));
+	ensure(bool(source_file), fmt::format("Couldn't open source file {}", filename));
 
 	std::string source{std::istreambuf_iterator<char>(source_file), {}};
 
-	auto tokens = lex(source);
+	auto tokens = lex(source, filename.c_str());
 
 	Parser parser;
 	auto parse_result = parser.parse_function({ tokens.data(), tokens.size() });
 
 	if (!parse_result) {
-		ensure(false, parse_result.error);
+		error(parse_result.error);
 	}
 
 	if (print_ast) {
