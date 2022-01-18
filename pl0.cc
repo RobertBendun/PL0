@@ -33,7 +33,6 @@ using namespace std::string_view_literals;
 namespace fs = std::filesystem;
 
 fs::path compiler_name;
-
 fs::path filename;
 
 void usage()
@@ -313,18 +312,17 @@ struct Expression
 
 	decltype(auto) operator+(Position pos) && { this->pos = pos; return std::move(*this); }
 
-	// TODO Accept output stream for allowing stderr error reporting with this function
-	void dump(unsigned indent = 0) const
+	void dump(std::ostream &out, unsigned indent = 0) const
 	{
-		auto const dump_params = [&] { for (auto const &p : params) p.dump(indent+2); };
+		auto const dump_params = [&] { for (auto const &p : params) p.dump(out, indent+2); };
 
 		fmt::print("{}", std::string(indent, ' '));
 		switch (kind) {
-		case Kind::Empty:         fmt::print("NOP\n");                break;
-		case Kind::Integer:       fmt::print("INT {}\n", ival);       break;
-		case Kind::Function_Call: fmt::print("FCALL\n");                                   dump_params(); break;
-		case Kind::Intrinsic:     fmt::print("INTRINSIC {}\n", intrinsic_name(intrinsic)); dump_params(); break;
-		case Kind::Sequence:      fmt::print("SEQ\n");                                     dump_params(); break;
+		case Kind::Empty:         fmt::print(out, "NOP\n");                break;
+		case Kind::Integer:       fmt::print(out, "INT {}\n", ival);       break;
+		case Kind::Function_Call: fmt::print(out, "FCALL\n");                                   dump_params(); break;
+		case Kind::Intrinsic:     fmt::print(out, "INTRINSIC {}\n", intrinsic_name(intrinsic)); dump_params(); break;
+		case Kind::Sequence:      fmt::print(out, "SEQ\n");                                     dump_params(); break;
 		}
 	}
 };
@@ -393,8 +391,10 @@ struct Parser
 				p.params.push_back(value.expr);
 				tokens = value.remaining;
 				if (consume(tokens, Token::Kind::Comma))
+					// We expect next argument here
 					continue;
 				else if (consume(tokens, Token::Kind::Close_Paren))
+					// End of parameter list
 					break;
 				else
 					return failure(tokens, "Expected either , or )");
@@ -476,13 +476,12 @@ struct Parser
 		return failure(tokens, "Expected expression");
 	}
 
-	// TODO Accept output stream
-	void dump()
+	void dump(std::ostream &out)
 	{
 		for (auto const& function : all_functions) {
-			fmt::print("FUNCTION {} {}\n", function.name, function.pos);
-			function.body.dump();
-			fmt::print("END FUNCTION {}\n", function.name);
+			fmt::print(out, "FUNCTION {} {}\n", function.name, function.pos);
+			function.body.dump(out);
+			fmt::print(out, "END FUNCTION {}\n", function.name);
 		}
 	}
 };
@@ -592,7 +591,7 @@ struct IR_Compiler
 
 		default:
 			std::cout << "Unknown expression kind:\n";
-			expr.dump();
+			expr.dump(std::cerr);
 			std::cout << std::flush;
 			std::exit(1);
 		}
@@ -608,15 +607,14 @@ struct IR_Compiler
 
 	// FIXME This algorithm produce misleading output. For now IR_Compiler::dump_dot is better then
 	// IR_Compiler::dump() beacuse it prints statements in creation order, not in control flow order
-	// TODO Accept output stream. Useful for error reporting on stderr, not stdout
-	void dump() const
+	void dump(std::ostream& out) const
 	{
 		for (auto const& stmt_ptr : all_statements) {
 			auto stmt = stmt_ptr.get();
 			if (auto match = std::find_if(entry_points.begin(), entry_points.end(), [&](auto const& kv) { return kv.second == stmt; }); match != entry_points.end()) {
-				fmt::print("{}:\n", match->first);
+				fmt::print(out, "{}:\n", match->first);
 			}
-			fmt::print("  {}\n", stmt->string());
+			fmt::print(out, "  {}\n", stmt->string());
 		}
 	}
 
@@ -683,7 +681,7 @@ int main(int, char **argv)
 
 	if (print_ast) {
 		fmt::print("--- AST DUMP -----------------------------\n");
-		parser.dump();
+		parser.dump(std::cout);
 	}
 
 	IR_Compiler compiler;
@@ -691,7 +689,7 @@ int main(int, char **argv)
 
 	if (print_ir) {
 		fmt::print("--- INTERMIDIATE REPRESENTATION ----------\n");
-		compiler.dump();
+		compiler.dump(std::cout);
 	}
 
 	if (!graph_ir.empty()) {
