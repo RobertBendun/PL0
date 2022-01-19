@@ -67,54 +67,57 @@ template<> struct fmt::formatter<Position> : fmt::formatter<std::string_view>
 	}
 };
 
-void ensure(bool b, auto message)
+namespace report
 {
-	if (b) return;
-	fmt::print(stderr, "{}: error: {}\n", compiler_name.c_str(), message);
-	std::exit(1);
-}
-
-void ensure(bool b, Position const& pos, auto const& message)
-{
-	if (b) return;
-	fmt::print(stderr, "{}: error: {}\n", pos, message);
-	std::exit(1);
-}
-
-[[noreturn]]
-inline void fatal(std::string type, std::string why, source_location loc = source_location::current())
-{
-	fmt::print(stderr, "{}:{}:{}: {}", loc.file_name(), loc.line(), loc.column(), type);
-	if (!why.empty()) {
-		fmt::print(stderr, ": {}\n", why);
-	} else {
-		fmt::print(stderr, "\n");
+	void ensure(bool b, auto message)
+	{
+		if (b) return;
+		fmt::print(stderr, "{}: error: {}\n", compiler_name.c_str(), message);
+		std::exit(1);
 	}
-	std::exit(1);
-}
 
-[[noreturn]]
-void unimplemented(std::string why = {}, source_location loc = source_location::current())
-{
-	fatal("unimplemented", why, loc);
-}
+	void ensure(bool b, Position const& pos, auto const& message)
+	{
+		if (b) return;
+		fmt::print(stderr, "{}: error: {}\n", pos, message);
+		std::exit(1);
+	}
 
-[[noreturn]]
-void unreachable(std::string why = {}, source_location loc = source_location::current())
-{
-	fatal("unreachable", why, loc);
-}
+	[[noreturn]]
+	inline void fatal(std::string type, std::string why, source_location loc = source_location::current())
+	{
+		fmt::print(stderr, "{}:{}:{}: {}", loc.file_name(), loc.line(), loc.column(), type);
+		if (!why.empty()) {
+			fmt::print(stderr, ": {}\n", why);
+		} else {
+			fmt::print(stderr, "\n");
+		}
+		std::exit(1);
+	}
 
-template<typename T>
-requires requires (T const& t) { { t.pos } -> std::convertible_to<Position>; }
-void ensure(bool b, T const& with_pos_field, auto const& message)
-{
-	ensure(b, with_pos_field.pos, message);
-}
+	[[noreturn]]
+	void unimplemented(std::string why = {}, source_location loc = source_location::current())
+	{
+		fatal("unimplemented", why, loc);
+	}
 
-void error(auto const& ...params)
-{
-	ensure(false, params...);
+	[[noreturn]]
+	void unreachable(std::string why = {}, source_location loc = source_location::current())
+	{
+		fatal("unreachable", why, loc);
+	}
+
+	template<typename T>
+	requires requires (T const& t) { { t.pos } -> std::convertible_to<Position>; }
+	void ensure(bool b, T const& with_pos_field, auto const& message)
+	{
+		ensure(b, with_pos_field.pos, message);
+	}
+
+	void error(auto const& ...params)
+	{
+		ensure(false, params...);
+	}
 }
 
 enum class Keyword_Kind
@@ -244,7 +247,7 @@ std::vector<Token> lex(std::string_view source, std::string_view path)
 
 			auto res = std::find_if_not(source.begin(), source.end(), [](auto ch) { return std::isalpha(ch) || ch == '_'; });
 			source = { source.begin(), res };
-			error(pos, fmt::format("Unknown intrinsic `#{}`", source));
+			report::error(pos, fmt::format("Unknown intrinsic `#{}`", source));
 		}
 
 		// TODO Add hex (0x), octal (0o) and binary (Ob) literals.
@@ -276,7 +279,7 @@ std::vector<Token> lex(std::string_view source, std::string_view path)
 		case ',': source.remove_prefix(1); token.kind = Token::Kind::Comma;       goto lex_next_keyword;
 		}
 
-		error(pos, fmt::format("Unexpected sequence: {}", std::quoted(source)));
+		report::error(pos, fmt::format("Unexpected sequence: {}", std::quoted(source)));
 lex_next_keyword:
 		pos = std::copy(start_source.data(), source.data(), pos);
 	}
@@ -364,7 +367,7 @@ struct Parser
 		// TODO Empty file is not allowed for getting better error messages. Alternative (and probably better) solution might be
 		// remembering where lexer finished, and keep it as end of file mark. Due to current error handling structure, changing
 		// this will only require changes in Parser::failure member function.
-		ensure(!all_tokens.empty(), fmt::format("File {} is empty. Empty source files are not allowed.", filename));
+		report::ensure(!all_tokens.empty(), fmt::format("File {} is empty. Empty source files are not allowed.", filename));
 	}
 
 	struct Result
@@ -434,12 +437,12 @@ struct Parser
 		switch (intr->intrinsic) {
 		case Instrinsic_Kind::Syscall:
 			return parse_call_params(tokens).then([&](Expression expr) {
-				ensure(expr.params.size() >= 1, intr->pos, "#syscall requires at least one parameter (syscall number)");
+					report::ensure(expr.params.size() >= 1, intr->pos, "#syscall requires at least one parameter (syscall number)");
 				return Expression(Instrinsic_Kind::Syscall, expr.params) + intr->pos;
 			});
 
 		default:
-			unimplemented(fmt::format("Parsing of intrinsic #{}", intrinsic_name(intr->intrinsic)));
+			report::unimplemented(fmt::format("Parsing of intrinsic #{}", intrinsic_name(intr->intrinsic)));
 		}
 	}
 
@@ -538,7 +541,7 @@ struct Statement
 			return str;
 		}
 
-		unreachable();
+		report::unreachable();
 	}
 };
 
@@ -599,7 +602,7 @@ struct IR_Compiler
 					break;
 
 				default:
-					unimplemented(fmt::format("intrinsic `{}`", intrinsic_name(expr.intrinsic)));
+					report::unimplemented(fmt::format("intrinsic `{}`", intrinsic_name(expr.intrinsic)));
 				}
 			}
 			break;
@@ -669,21 +672,21 @@ int main(int, char **argv)
 			if (arg == "print-ir")  { print_ir = true;  continue; }
 
 			if (arg == "graph-ir") {
-				ensure(*++argv, "-graph-ir expects filename to put DOT graph");
+				report::ensure(*++argv, "-graph-ir expects filename to put DOT graph");
 				graph_ir = *argv;
 				continue;
 			}
-			error(fmt::format("Unrecognized command line option: {}", arg));
+			report::error(fmt::format("Unrecognized command line option: {}", arg));
 		}
 
-		ensure(filename.empty(), "Only one filename can be specified");
+		report::ensure(filename.empty(), "Only one filename can be specified");
 		filename = arg;
 	}
 
-	ensure(!filename.empty(), "Source file was not specified");
+	report::ensure(!filename.empty(), "Source file was not specified");
 
 	std::ifstream source_file(filename);
-	ensure(bool(source_file), fmt::format("Couldn't open source file {}", filename));
+	report::ensure(bool(source_file), fmt::format("Couldn't open source file {}", filename));
 
 	std::string source{std::istreambuf_iterator<char>(source_file), {}};
 
@@ -692,7 +695,7 @@ int main(int, char **argv)
 	Parser parser(tokens, filename);
 	auto parse_result = parser.parse_function(tokens);
 
-	ensure(!parse_result, parse_result.error);
+	report::ensure(!parse_result, parse_result.error);
 
 	if (print_ast) {
 		fmt::print("--- AST DUMP -----------------------------\n");
