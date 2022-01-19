@@ -186,6 +186,17 @@ struct Token
 	std::string_view sval;
 	Keyword_Kind keyword;
 	Instrinsic_Kind intrinsic;
+
+#define Member_Compare(Type, Kind, Member) \
+	friend std::partial_ordering operator<=>(Token const& t, Type v) { \
+		if (t.kind == Kind) return t.Member <=> v; \
+		return std::partial_ordering::unordered; } \
+	friend auto operator<=>(Type v, Token const& t) { return t <=> v; }
+
+	Member_Compare(Instrinsic_Kind, Token::Kind::Intrinsic, intrinsic)
+	Member_Compare(Keyword_Kind, Token::Kind::Keyword, keyword)
+
+#undef Member_Compare
 };
 
 std::vector<Token> lex(std::string_view source, std::string_view path)
@@ -337,25 +348,6 @@ struct Function
 	Position pos;
 };
 
-bool expect(std::span<Token> tokens, Token::Kind kind)
-{
-	return !tokens.empty() && tokens.front().kind == kind;
-}
-
-bool expect(std::span<Token> tokens, Keyword_Kind kind)
-{
-	return !tokens.empty() && tokens.front().kind == Token::Kind::Keyword && tokens.front().keyword == kind;
-}
-
-std::optional<Token> consume(std::span<Token> &tokens, auto ...args)
-{
-	if (expect(tokens, args...)) {
-		auto token = tokens.front();
-		tokens = tokens.subspan(1);
-		return token;
-	}
-	return {};
-}
 
 struct Parser
 {
@@ -391,6 +383,15 @@ struct Parser
 		return failure(remaining, remaining[pos].pos, std::move(error));
 	}
 
+	static bool expect(std::span<Token> tokens, Keyword_Kind kind) { return !tokens.empty() && tokens.front() <=> kind == 0; }
+	static bool expect(std::span<Token> tokens, Token::Kind kind)  { return !tokens.empty() && tokens.front().kind == kind; }
+
+	static std::optional<Token> consume(std::span<Token> &tokens, auto ...args)
+	{
+		if (expect(tokens, args...)) return std::exchange(tokens, tokens.subspan(1)).front();
+		return {};
+	}
+
 	Parser::Result parse_value(std::span<Token> tokens)
 	{
 		auto maybe_int = consume(tokens, Token::Kind::Integer);
@@ -406,22 +407,26 @@ struct Parser
 
 		Expression p;
 		for (;;) {
-			if (auto value = parse_expression(tokens); value) {
+			auto value = parse_expression(tokens);
+			if (value) {
 				p.params.push_back(value.expr);
 				tokens = value.remaining;
-				if (consume(tokens, Token::Kind::Comma))
-					// We expect next argument here
-					continue;
-				else if (consume(tokens, Token::Kind::Close_Paren))
-					// End of parameter list
-					break;
-				else
-					return failure(tokens, 0, "Expected either , or )", "Expected either , or ) after this point, got  end of file");
-			} else if (consume(tokens, Token::Kind::Close_Paren)) {
-				break;
-			} else {
-				return value; // Value is in failure state here
+				if (consume(tokens, Token::Kind::Comma)) continue; // We loop, beacuse we need to parse another argument after comma
+				if (consume(tokens, Token::Kind::Close_Paren)) break; // We break, beacuse ) marks end of argument list
+
+				return failure(tokens, 0, "Expected either , or )", "Expected either , or ) after this point, got  end of file");
 			}
+			// If we cannot parse any more expressions, and we have close paren we know that this is and of call
+			// TODO This case probably is only hit, when we have ill-formed or empty parameter list like () or (foo, bar,) <- unnesesary comma
+			// Maybe we allow this, to make code like this idiomatic:
+			// foo(
+			//   bar,
+			//   car,
+			// )
+			if (consume(tokens, Token::Kind::Close_Paren))
+				break;
+			else
+				return value; // Value is in failure state here
 		}
 		return p.params.empty()
 			? success(std::move(p), tokens)
@@ -529,11 +534,13 @@ struct Statement
 			return "NOP";
 
 		case Statement::Kind::Copy:
+			assert(params.size() == 1 || params.size() == 2);
 			return params.size() == 1
-				? fmt::format("COPY ${}, {}", params.front(), value)
+				? fmt::format("COPY ${}, {}", params[0], value)
 				: fmt::format("COPY ${}, ${}", params[0], params[1]);
 
 		case Statement::Kind::Syscall:
+			assert(params.size() > 2);
 			auto str = fmt::format("SYSCALL RET=${} ID=${} ", params[0], params[1]);
 			if (params.size() > 2) str += "ARGS=";
 			for (auto i = 2u; i < params.size(); ++i)
