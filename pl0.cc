@@ -185,7 +185,6 @@ struct Token
 	Instrinsic_Kind intrinsic;
 };
 
-// TODO Add tracking line and column of tokens
 std::vector<Token> lex(std::string_view source, std::string_view path)
 {
 	std::vector<Token> tokens;
@@ -357,33 +356,50 @@ std::optional<Token> consume(std::span<Token> &tokens, auto ...args)
 
 struct Parser
 {
-	std::vector<Function> all_functions;
+	std::vector<Function> all_functions{};
+	std::span<Token> all_tokens{}; // Used primarly for error reporting
+
+	Parser(std::span<Token> all_tokens, fs::path filename) : all_tokens{all_tokens}
+	{
+		// TODO Empty file is not allowed for getting better error messages. Alternative (and probably better) solution might be
+		// remembering where lexer finished, and keep it as end of file mark. Due to current error handling structure, changing
+		// this will only require changes in Parser::failure member function.
+		ensure(!all_tokens.empty(), fmt::format("File {} is empty. Empty source files are not allowed.", filename));
+	}
 
 	struct Result
 	{
 		Expression expr;
 		std::span<Token> remaining{};
 		std::string error{};
+		Position error_pos{};
 
 		operator bool() const { return error.empty(); }
 		Result then(auto callable) && { if (*this) return success(callable(std::move(expr)), remaining); return *this; }
 	};
 
 	static Result success(Expression e, std::span<Token> remaining) { return { std::move(e), remaining }; }
-	static Result failure(std::span<Token> remaining, std::string error) { return { {}, remaining, std::move(error) }; }
+	static Result failure(std::span<Token> remaining, Position pos, std::string error) { return { {}, remaining, std::move(error), std::move(pos) }; }
+
+	Result failure(std::span<Token> remaining, unsigned pos, std::string error, std::string error_eof)
+	{
+		if (pos >= remaining.size())
+			return failure(remaining, all_tokens.back().pos, std::move(error_eof));
+		return failure(remaining, remaining[pos].pos, std::move(error));
+	}
 
 	Parser::Result parse_value(std::span<Token> tokens)
 	{
 		auto maybe_int = consume(tokens, Token::Kind::Integer);
 		return maybe_int
 			? success(Expression(maybe_int->ival) + maybe_int->pos, tokens)
-			: failure(tokens, "Expected integer value");
+			: failure(tokens, 0, "Expected integer value", "Expected integer value after this point, got end of file");
 	}
 
 	Result parse_call_params(std::span<Token> tokens)
 	{
 		if (!consume(tokens, Token::Kind::Open_Paren))
-			return failure(tokens, "Call expression parameters must begin with (");
+				return failure(tokens, 0, "Call expression parameters must begin with (", "Expected ( after this point, got an end of file");
 
 		Expression p;
 		for (;;) {
@@ -397,7 +413,7 @@ struct Parser
 					// End of parameter list
 					break;
 				else
-					return failure(tokens, "Expected either , or )");
+					return failure(tokens, 0, "Expected either , or )", "Expected either , or ) after this point, got  end of file");
 			} else if (consume(tokens, Token::Kind::Close_Paren)) {
 				break;
 			} else {
@@ -413,18 +429,17 @@ struct Parser
 	{
 		auto intr = consume(tokens, Token::Kind::Intrinsic);
 		if (!intr)
-			return failure(tokens, "Intrinsic expression must begin with intrinsic token");
+			return failure(tokens, 0, "Intrinsic expression must begin with intrinsic token", "Expected intrinsic expression after this point, got end of file");
 
 		switch (intr->intrinsic) {
 		case Instrinsic_Kind::Syscall:
 			return parse_call_params(tokens).then([&](Expression expr) {
-				// TODO Ensure that there is at least one parameter. `#syscall()` is not allowed
 				ensure(expr.params.size() >= 1, intr->pos, "#syscall requires at least one parameter (syscall number)");
 				return Expression(Instrinsic_Kind::Syscall, expr.params) + intr->pos;
 			});
 
 		default:
-			assert(false && "Parsing this intrinsic kind unimplemented yet");
+			unimplemented(fmt::format("Parsing of intrinsic #{}", intrinsic_name(intr->intrinsic)));
 		}
 	}
 
@@ -432,15 +447,14 @@ struct Parser
 	{
 		auto const maybe_open_block = consume(tokens, Token::Kind::Open_Block);
 		if (!maybe_open_block)
-			return failure(tokens, "Block must begin with {");
+			return failure(tokens, 0, "Block must begin with {", "Expected block after this point, got end of file");
 
 		auto block = parse_intrinsic(tokens).then([&](Expression expr) {
 			return Expression(Expression::Kind::Sequence, expr) + maybe_open_block->pos;
 		});
 
 		if (!consume(block.remaining, Token::Kind::Close_Block))
-			return failure(tokens, "Block must end with }");
-
+			return failure(block.remaining, 0, "Block must end with }", "Expected block end after this point, got end of file");
 		return block;
 	}
 
@@ -448,11 +462,11 @@ struct Parser
 	{
 		auto maybe_function_keyword = consume(tokens, Keyword_Kind::Function);
 		if (!maybe_function_keyword)
-			return failure(tokens, "Function must begin with fun keyword");
+				return failure(tokens, 0, "Function must begin with fun keyword", "Expected function after this point, got end of file");
 
 		auto maybe_identifier = consume(tokens, Token::Kind::Identifier);
 		if (!maybe_identifier)
-			return failure(tokens, "`fun` must be followed by an indentifier");
+			return failure(tokens, maybe_function_keyword->pos, "`fun` must be followed by an indentifier");
 
 		return parse_expression(tokens).then([&](Expression body) {
 			all_functions.push_back(Function { std::string(maybe_identifier->sval), std::move(body), maybe_function_keyword->pos });
@@ -462,7 +476,7 @@ struct Parser
 
 	Result parse_expression(std::span<Token> tokens)
 	{
-		std::function<Parser::Result(Parser &, std::span<Token>)> funcs[] = {
+		std::function<Parser::Result(Parser&, std::span<Token>)> funcs[] = {
 			&Parser::parse_intrinsic,
 			&Parser::parse_block,
 			&Parser::parse_value,
@@ -473,7 +487,8 @@ struct Parser
 			if (auto result = func(*this, tokens); result)
 				return result;
 		}
-		return failure(tokens, "Expected expression");
+
+		return failure(tokens, 0, "Expected expression", "Expected expression after this point, got end of file");
 	}
 
 	void dump(std::ostream &out)
@@ -674,8 +689,8 @@ int main(int, char **argv)
 
 	auto tokens = lex(source, filename.c_str());
 
-	Parser parser;
-	auto parse_result = parser.parse_function({ tokens.data(), tokens.size() });
+	Parser parser(tokens, filename);
+	auto parse_result = parser.parse_function(tokens);
 
 	ensure(!parse_result, parse_result.error);
 
