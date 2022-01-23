@@ -29,6 +29,7 @@
 
 using namespace fmt::literals;
 using namespace std::string_view_literals;
+using namespace std::string_literals;
 
 namespace fs = std::filesystem;
 
@@ -569,6 +570,12 @@ struct IR_Compiler
 
 	Statement* new_statement() { return all_statements.emplace_back(std::make_unique<Statement>()).get(); }
 
+	std::string_view find_entry_point(Statement const* stmt) const
+	{
+		auto match = std::find_if(entry_points.begin(), entry_points.end(), [&](auto const& kv) { return kv.second == stmt; });
+		return match != entry_points.end() ? std::string_view(match->first) : std::string_view{};
+	}
+
 	struct Context
 	{
 		Statement **target;       // place where to put next statement
@@ -646,8 +653,8 @@ struct IR_Compiler
 	{
 		for (auto const& stmt_ptr : all_statements) {
 			auto stmt = stmt_ptr.get();
-			if (auto match = std::find_if(entry_points.begin(), entry_points.end(), [&](auto const& kv) { return kv.second == stmt; }); match != entry_points.end()) {
-				fmt::print(out, "{}:\n", match->first);
+			if (auto entry = find_entry_point(stmt); !entry.empty()) {
+				fmt::print(out, "{}:\n", entry);
 			}
 			fmt::print(out, "  {}\n", stmt->string());
 		}
@@ -664,6 +671,93 @@ struct IR_Compiler
 		fmt::print(out, "}}\n");
 	}
 };
+
+template<typename T, typename R>
+auto reduce(Statement const* s, T value, R reducer)
+	-> decltype(reducer(std::move(value), *s))
+{
+	if (!s) return value;
+	// TODO Support false branch
+	assert(s->false_branch == nullptr);
+	return reduce(s->next, reducer(std::move(value), *s), reducer);
+}
+
+namespace x86_64::linux::nasm
+{
+	void emit_assembly(std::ostream &out, IR_Compiler const& ir)
+	{
+		fmt::print(out, "BITS 64\n");
+		fmt::print(out, "segment .text\n");
+		fmt::print(out, "extern _start\n");
+		fmt::print(out, "_start:\n");
+		fmt::print(out, "  call main\n");
+		fmt::print(out, "  mov rax, 60\n");
+		fmt::print(out, "  xor rdi, rdi\n");
+		fmt::print(out, "  syscall\n\n");
+
+
+		// Emitting assembly of function main
+		auto root = ir.entry_points.at("main"s);
+
+		fmt::print(out, "main:\n");
+		fmt::print(out, "  push rbp\n");
+		fmt::print(out, "  mov rbp, rsp\n");
+
+		auto max_var_id = reduce(root, 0u, [](auto v, Statement const& s) {
+			auto max = std::max_element(s.params.begin(), s.params.end());
+			return max != s.params.end() && *max > v ? *max : v;
+		});
+
+		// All values are allocated as 8 byte variables on the stack
+		// The max ID of variable is the number of variables that are required for
+		// given function
+		// TODO: Maybe even put some in registers? x86_64 has plenty
+		// TODO: Algorithm that will reduce variable names to reduce space allocation per function call
+
+		fmt::print(out, "  sub rsp, {}\n", (max_var_id+1) * 8);
+
+		for (auto s = root; s; s = s->next) {
+			// TODO This dessign only supports linear execution
+			assert(s->false_branch == nullptr);
+			switch (s->kind) {
+			case Statement::Kind::Nop:
+				break;
+			case Statement::Kind::Copy:
+				{
+					assert(!s->params.empty());
+					auto target = s->params[0];
+					if (s->params.size() == 1) {
+						fmt::print(out, "  mov qword [rbp-{}], {}\n", 8 * target, s->value);
+						continue;
+					} else {
+						for (auto i = 0u; i < s->params.size(); ++i) {
+							fmt::print(out, "  mov rax, [rbp-{}]\n", 8 * s->params[i]);
+							fmt::print(out, "  mov [rbp-{}], rax\n", 8 * target);
+						}
+					}
+				}
+				break;
+
+			case Statement::Kind::Syscall:
+				{
+					static char const* regs[] = { "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9" };
+					assert(s->params.size()-1 < std::size(regs));
+
+					for (auto i = 1u; i < s->params.size(); ++i) {
+						fmt::print(out, "  mov {}, [rbp-{}]\n", regs[i-1], s->params[i] * 8);
+					}
+
+					fmt::print(out, "  syscall\n");
+					fmt::print(out, "  mov [rbp-{}], rax\n", s->params[0] * 8);
+				}
+				break;
+			}
+		}
+
+		fmt::print(out, "  leave\n");
+		fmt::print(out, "  ret\n");
+	}
+}
 
 int main(int, char **argv)
 {
@@ -736,4 +830,19 @@ int main(int, char **argv)
 			compiler.dump_dot(file);
 		}
 	}
+
+	fs::path asm_path = filename; {
+		asm_path = asm_path.replace_extension("asm");
+		std::ofstream asm_file(asm_path);
+		x86_64::linux::nasm::emit_assembly(asm_file, compiler);
+	}
+
+	fs::path obj_path = filename;
+	obj_path = obj_path.replace_extension(".o");
+
+	fs::path exe_path = filename;
+	exe_path = exe_path.replace_extension();
+
+	if (os_exec::run_echo("nasm", "-felf64", asm_path)) return 1;
+	if (os_exec::run_echo("ld", obj_path, "-o", exe_path)) return 1;
 }
