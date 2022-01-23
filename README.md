@@ -4,6 +4,17 @@ __WARNING__: This language is work in progress and will be for a long time.
 
 The first goal of this project is to create language that is [self-hosted](https://en.wikipedia.org/wiki/Self-hosting_%28compilers%29), with not to much noise around this task. For this reason language will be as simple as is reasonable for me.
 
+```
+// Returns 42 from the program
+fun exit {
+	#syscall(60, 42)
+}
+
+fun main {
+	exit()
+}
+```
+
 ## Goals and plans
 
 - [x] Compiled
