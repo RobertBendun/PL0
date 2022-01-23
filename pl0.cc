@@ -21,10 +21,10 @@
 // Hack for using std::source_location
 #ifndef __cpp_lib_source_location
 #include <experimental/source_location>
-using std::experimental::source_location;
+#define Using_Source_Location using std::experimental::source_location;
 #else
 #include <source_location>
-using std::source_location;
+#define Using_Source_Location using std::source_location;
 #endif
 
 using namespace fmt::literals;
@@ -34,6 +34,7 @@ namespace fs = std::filesystem;
 
 fs::path compiler_name;
 fs::path filename;
+bool report_error_raise_location = false;
 
 void usage()
 {
@@ -42,6 +43,7 @@ void usage()
 	fmt::print(stderr, "    --graph-ir <dot-file> Writes to <dot-file> graph of IR\n");
 	fmt::print(stderr, "    --print-ast           Prints AST of whole program\n");
 	fmt::print(stderr, "    --print-ir            Prints generated Intermidiate representation\n");
+	fmt::print(stderr, "    --where-error         Print where (in compiler) error was generated\n");
 	std::exit(1);
 }
 
@@ -69,16 +71,26 @@ template<> struct fmt::formatter<Position> : fmt::formatter<std::string_view>
 
 namespace report
 {
-	void ensure(bool b, auto message)
+	Using_Source_Location;
+
+	inline void report_location(source_location loc)
+	{
+		if (!report_error_raise_location) return;
+		fmt::print(stderr, "[INFO] Error function called at: {}:{}:{}\n", loc.file_name(), loc.line(), loc.column());
+	}
+
+	void ensure(bool b, auto message, source_location loc = source_location::current())
 	{
 		if (b) return;
+		report_location(loc);
 		fmt::print(stderr, "{}: error: {}\n", compiler_name.c_str(), message);
 		std::exit(1);
 	}
 
-	void ensure(bool b, Position const& pos, auto const& message)
+	void ensure(bool b, Position const& pos, auto const& message, source_location loc = source_location::current())
 	{
 		if (b) return;
+		report_location(loc);
 		fmt::print(stderr, "{}: error: {}\n", pos, message);
 		std::exit(1);
 	}
@@ -109,15 +121,13 @@ namespace report
 
 	template<typename T>
 	requires requires (T const& t) { { t.pos } -> std::convertible_to<Position>; }
-	void ensure(bool b, T const& with_pos_field, auto const& message)
+	void ensure(bool b, T const& with_pos_field, auto const& message, source_location loc = source_location::current())
 	{
-		ensure(b, with_pos_field.pos, message);
+		ensure(b, with_pos_field.pos, message, loc);
 	}
 
-	void error(auto const& ...params)
-	{
-		ensure(false, params...);
-	}
+	void error(auto const& p1,                 source_location loc = source_location::current()) { ensure(false, p1,     loc); }
+	void error(auto const& p1, auto const& p2, source_location loc = source_location::current()) { ensure(false, p1, p2, loc); }
 }
 
 enum class Keyword_Kind
@@ -674,9 +684,10 @@ int main(int, char **argv)
 			arg.remove_prefix(1);
 			if (arg.starts_with('-')) arg.remove_prefix(1);
 
-			if (arg == "help") usage();
-			if (arg == "print-ast") { print_ast = true; continue; }
-			if (arg == "print-ir")  { print_ir = true;  continue; }
+			if (arg == "help")         usage();
+			if (arg == "print-ast")    { print_ast = true; continue; }
+			if (arg == "print-ir")     { print_ir = true;  continue; }
+			if (arg == "where-error")  { report_error_raise_location = true; continue; }
 
 			if (arg == "graph-ir") {
 				report::ensure(*++argv, "-graph-ir expects filename to put DOT graph");
@@ -702,7 +713,7 @@ int main(int, char **argv)
 	Parser parser(tokens, filename);
 	auto parse_result = parser.parse_function(tokens);
 
-	report::ensure(!parse_result, parse_result.error);
+	report::ensure(parse_result, parse_result.error);
 
 	if (print_ast) {
 		fmt::print("--- AST DUMP -----------------------------\n");
