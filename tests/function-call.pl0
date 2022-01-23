@@ -1,0 +1,7 @@
+fun exit {
+	#syscall(60, 42)
+}
+
+fun main {
+	exit()
+}

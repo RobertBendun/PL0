@@ -21,10 +21,9 @@
 // Hack for using std::source_location
 #ifndef __cpp_lib_source_location
 #include <experimental/source_location>
-#define Using_Source_Location using std::experimental::source_location;
+namespace std { using std::experimental::source_location; }
 #else
 #include <source_location>
-#define Using_Source_Location using std::source_location;
 #endif
 
 using namespace fmt::literals;
@@ -36,15 +35,18 @@ namespace fs = std::filesystem;
 fs::path compiler_name;
 fs::path filename;
 bool report_error_raise_location = false;
+bool dont_produce_executable = false;
 
 void usage()
 {
 	fmt::print(stderr, "usage: {} [options] <source-code>\n", compiler_name.c_str());
 	fmt::print(stderr, "  where options are:\n");
 	fmt::print(stderr, "    --graph-ir <dot-file> Writes to <dot-file> graph of IR\n");
+	fmt::print(stderr, "    --print-tokens        Prints tokens of whole program\n");
 	fmt::print(stderr, "    --print-ast           Prints AST of whole program\n");
 	fmt::print(stderr, "    --print-ir            Prints generated Intermidiate representation\n");
 	fmt::print(stderr, "    --where-error         Print where (in compiler) error was generated\n");
+	fmt::print(stderr, "    --no-executable       Do not produce assembly and final executable\n");
 	std::exit(1);
 }
 
@@ -72,15 +74,13 @@ template<> struct fmt::formatter<Position> : fmt::formatter<std::string_view>
 
 namespace report
 {
-	Using_Source_Location;
-
-	inline void report_location(source_location loc)
+	inline void report_location(std::source_location loc)
 	{
 		if (!report_error_raise_location) return;
 		fmt::print(stderr, "[INFO] Error function called at: {}:{}:{}\n", loc.file_name(), loc.line(), loc.column());
 	}
 
-	void ensure(bool b, auto message, source_location loc = source_location::current())
+	void ensure(bool b, auto message, std::source_location loc = std::source_location::current())
 	{
 		if (b) return;
 		report_location(loc);
@@ -88,7 +88,7 @@ namespace report
 		std::exit(1);
 	}
 
-	void ensure(bool b, Position const& pos, auto const& message, source_location loc = source_location::current())
+	void ensure(bool b, Position const& pos, auto const& message, std::source_location loc = std::source_location::current())
 	{
 		if (b) return;
 		report_location(loc);
@@ -97,7 +97,7 @@ namespace report
 	}
 
 	[[noreturn]]
-	inline void fatal(std::string type, std::string why, source_location loc = source_location::current())
+	inline void fatal(std::string type, std::string why, std::source_location loc = std::source_location::current())
 	{
 		fmt::print(stderr, "{}:{}:{}: {}", loc.file_name(), loc.line(), loc.column(), type);
 		if (!why.empty()) {
@@ -109,26 +109,26 @@ namespace report
 	}
 
 	[[noreturn]]
-	void unimplemented(std::string why = {}, source_location loc = source_location::current())
+	void unimplemented(std::string why = {}, std::source_location loc = std::source_location::current())
 	{
 		fatal("unimplemented", why, loc);
 	}
 
 	[[noreturn]]
-	void unreachable(std::string why = {}, source_location loc = source_location::current())
+	void unreachable(std::string why = {}, std::source_location loc = std::source_location::current())
 	{
 		fatal("unreachable", why, loc);
 	}
 
 	template<typename T>
 	requires requires (T const& t) { { t.pos } -> std::convertible_to<Position>; }
-	void ensure(bool b, T const& with_pos_field, auto const& message, source_location loc = source_location::current())
+	void ensure(bool b, T const& with_pos_field, auto const& message, std::source_location loc = std::source_location::current())
 	{
 		ensure(b, with_pos_field.pos, message, loc);
 	}
 
-	void error(auto const& p1,                 source_location loc = source_location::current()) { ensure(false, p1,     loc); }
-	void error(auto const& p1, auto const& p2, source_location loc = source_location::current()) { ensure(false, p1, p2, loc); }
+	void error(auto const& p1,                 std::source_location loc = std::source_location::current()) { ensure(false, p1,     loc); }
+	void error(auto const& p1, auto const& p2, std::source_location loc = std::source_location::current()) { ensure(false, p1, p2, loc); }
 }
 
 enum class Keyword_Kind
@@ -149,6 +149,11 @@ constexpr Keyword_Description Keywords_Description[] = {
 
 static_assert(std::size(Keywords_Description) == 1u + (size_t)Keyword_Kind::Enum_Last,
 	"Exhaustive keyword to string matching");
+
+std::string_view keyword_name(Keyword_Kind kind)
+{
+	return std::find_if(Keywords_Description, std::end(Keywords_Description), [=](auto const& x) { return x.kind == kind; })->as_string;
+}
 
 enum class Instrinsic_Kind
 {
@@ -209,6 +214,26 @@ struct Token
 
 #undef Member_Compare
 };
+
+void dump(std::span<Token> tokens)
+{
+	for (auto const& token : tokens) {
+		fmt::print("{}:{}:{}: ", token.pos.file, token.pos.line, token.pos.column);
+		switch (token.kind) {
+		case Token::Kind::Identifier:  fmt::print("ID {}\n", std::quoted(token.sval)); break;
+		case Token::Kind::Integer:     fmt::print("INT {}\n", token.ival); break;
+
+		case Token::Kind::Intrinsic:   fmt::print("INTR {}\n", intrinsic_name(token.intrinsic)); break;
+		case Token::Kind::Keyword:     fmt::print("KEYW {}\n",  keyword_name(token.keyword)); break;
+
+		case Token::Kind::Comma:       fmt::print(",\n");  break;
+		case Token::Kind::Close_Paren: fmt::print(")\n");  break;
+		case Token::Kind::Open_Paren:  fmt::print("(\n");  break;
+		case Token::Kind::Close_Block: fmt::print("{{\n"); break;
+		case Token::Kind::Open_Block:  fmt::print("}}\n"); break;
+		}
+	}
+}
 
 std::vector<Token> lex(std::string_view source, std::string_view path)
 {
@@ -316,7 +341,7 @@ struct Expression
 	{
 		Empty, Integer, // atoms
 		Sequence, // blocks
-		Function_Call, // p0(p1, p2, ...)
+		Function_Call, // sval(p0, p1, ...)
 		Intrinsic
 	};
 
@@ -324,6 +349,7 @@ struct Expression
 	Position pos{};
 	uint64_t ival{};
 	Instrinsic_Kind intrinsic{};
+	std::string sval;
 	std::list<Expression> params{};
 
 	template<typename ...T>
@@ -344,7 +370,7 @@ struct Expression
 		switch (kind) {
 		case Kind::Empty:         fmt::print(out, "NOP\n");                break;
 		case Kind::Integer:       fmt::print(out, "INT {}\n", ival);       break;
-		case Kind::Function_Call: fmt::print(out, "FCALL\n");                                   dump_params(); break;
+		case Kind::Function_Call: fmt::print(out, "FCALL {}\n", sval);                          dump_params(); break;
 		case Kind::Intrinsic:     fmt::print(out, "INTRINSIC {}\n", intrinsic_name(intrinsic)); dump_params(); break;
 		case Kind::Sequence:      fmt::print(out, "SEQ\n");                                     dump_params(); break;
 		}
@@ -358,7 +384,6 @@ struct Function
 	Expression body;
 	Position pos;
 };
-
 
 struct Parser
 {
@@ -375,23 +400,27 @@ struct Parser
 
 	struct Result
 	{
-		Expression expr;
+		Expression expr{};
 		std::span<Token> remaining{};
 		std::string error{};
 		Position error_pos{};
+		std::source_location error_rise_location{};
 
 		operator bool() const { return error.empty(); }
 		Result then(auto callable) && { if (*this) return success(callable(std::move(expr)), remaining); return *this; }
 	};
 
 	static Result success(Expression e, std::span<Token> remaining) { return { std::move(e), remaining }; }
-	static Result failure(std::span<Token> remaining, Position pos, std::string error) { return { {}, remaining, std::move(error), std::move(pos) }; }
+	static Result failure(std::span<Token> remaining, Position pos, std::string error, std::source_location loc = std::source_location::current())
+	{
+		return { {}, remaining, std::move(error), std::move(pos), loc };
+	}
 
-	Result failure(std::span<Token> remaining, unsigned pos, std::string error, std::string error_eof)
+	Result failure(std::span<Token> remaining, unsigned pos, std::string error, std::string error_eof, std::source_location loc = std::source_location::current())
 	{
 		if (pos >= remaining.size())
-			return failure(remaining, all_tokens.back().pos, std::move(error_eof));
-		return failure(remaining, remaining[pos].pos, std::move(error));
+			return failure(remaining, all_tokens.back().pos, std::move(error_eof), loc);
+		return failure(remaining, remaining[pos].pos, std::move(error), loc);
 	}
 
 	static bool expect(std::span<Token> tokens, Keyword_Kind kind) { return !tokens.empty() && tokens.front() <=> kind == 0; }
@@ -403,7 +432,7 @@ struct Parser
 		return {};
 	}
 
-	Parser::Result parse_value(std::span<Token> tokens)
+	Result parse_value(std::span<Token> tokens)
 	{
 		auto maybe_int = consume(tokens, Token::Kind::Integer);
 		return maybe_int
@@ -468,7 +497,7 @@ struct Parser
 		if (!maybe_open_block)
 			return failure(tokens, 0, "Block must begin with {", "Expected block after this point, got end of file");
 
-		auto block = parse_intrinsic(tokens).then([&](Expression expr) {
+		auto block = parse_expression(tokens).then([&](Expression expr) {
 			return Expression(Expression::Kind::Sequence, expr) + maybe_open_block->pos;
 		});
 
@@ -493,9 +522,29 @@ struct Parser
 		});
 	}
 
+
+	Result parse_function_call(std::span<Token> tokens)
+	{
+		auto maybe_identifier = consume(tokens, Token::Kind::Identifier);
+		if (!maybe_identifier)
+			return failure(tokens, 0, "Function call must begin with an identifier", "Expected identifier after this point, got end of file");
+
+		auto result = parse_call_params(tokens).then([&](Expression params) {
+			Expression funcall;
+			funcall.kind = Expression::Kind::Function_Call;
+			funcall.sval = maybe_identifier->sval;
+			funcall.params = params.params;
+			return std::move(funcall) + maybe_identifier->pos;
+		});
+
+		report::ensure(result, result.error_pos, result.error);
+		return result;
+	}
+
 	Result parse_expression(std::span<Token> tokens)
 	{
 		std::function<Parser::Result(Parser&, std::span<Token>)> funcs[] = {
+			&Parser::parse_function_call,
 			&Parser::parse_intrinsic,
 			&Parser::parse_block,
 			&Parser::parse_value,
@@ -508,6 +557,19 @@ struct Parser
 		}
 
 		return failure(tokens, 0, "Expected expression", "Expected expression after this point, got end of file");
+	}
+
+	// TODO This function will not return any Expression, so it's result should not contain expression
+	Result parse_program(std::span<Token> tokens)
+	{
+		while (!tokens.empty()) {
+			auto func = parse_function(tokens);
+			if (!func) {
+				return func;
+			}
+			tokens = func.remaining;
+		}
+		return {};
 	}
 
 	void dump(std::ostream &out)
@@ -530,6 +592,7 @@ struct Statement
 		Nop,
 		Copy,     // Copy into IR variable other variable or initialize with value
 		Syscall,  // p0 = syscall(syscall_number = p1, arg1 = p2, arg2 = p3, ...)
+		Call,     // name(p0, p1, ...)
 	};
 
 	Kind kind;
@@ -537,12 +600,16 @@ struct Statement
 	std::vector<Reg> params{};         // IR variables referenced by statement
 	Statement *next = nullptr;         // aka true branch
 	Statement *false_branch = nullptr; // aka false branch
+	std::string name{};
 
 	std::string string() const
 	{
 		switch (kind) {
 		case Statement::Kind::Nop:
 			return "NOP";
+
+		case Statement::Kind::Call:
+			return fmt::format("CALL {}", std::quoted(name));
 
 		case Statement::Kind::Copy:
 			assert(params.size() == 1 || params.size() == 2);
@@ -608,6 +675,18 @@ struct IR_Compiler
 				// Evaluate each and only keep last value
 				for (auto const& param : expr.params) result = compile(param, ctx);
 				return result;
+			}
+			break;
+
+		case Expression::Kind::Function_Call:
+			{
+				// TODO passing params is not implemented yet
+				assert(expr.params.empty());
+				auto stmt = new_statement();
+				stmt->kind = Statement::Kind::Call;
+				stmt->name = expr.sval;
+				put(stmt);
+				return Statement::Empty;
 			}
 			break;
 
@@ -684,22 +763,9 @@ auto reduce(Statement const* s, T value, R reducer)
 
 namespace x86_64::linux::nasm
 {
-	void emit_assembly(std::ostream &out, IR_Compiler const& ir)
+	void emit_function(std::ostream& out, std::string_view function_name, Statement *root)
 	{
-		fmt::print(out, "BITS 64\n");
-		fmt::print(out, "segment .text\n");
-		fmt::print(out, "extern _start\n");
-		fmt::print(out, "_start:\n");
-		fmt::print(out, "  call main\n");
-		fmt::print(out, "  mov rax, 60\n");
-		fmt::print(out, "  xor rdi, rdi\n");
-		fmt::print(out, "  syscall\n\n");
-
-
-		// Emitting assembly of function main
-		auto root = ir.entry_points.at("main"s);
-
-		fmt::print(out, "main:\n");
+		fmt::print(out, "{}:\n", function_name);
 		fmt::print(out, "  push rbp\n");
 		fmt::print(out, "  mov rbp, rsp\n");
 
@@ -722,6 +788,14 @@ namespace x86_64::linux::nasm
 			switch (s->kind) {
 			case Statement::Kind::Nop:
 				break;
+
+			case Statement::Kind::Call:
+				{
+					assert(s->params.empty());
+					fmt::print(out, "  call {}\n", s->name);
+				}
+				break;
+
 			case Statement::Kind::Copy:
 				{
 					assert(!s->params.empty());
@@ -757,10 +831,29 @@ namespace x86_64::linux::nasm
 		fmt::print(out, "  leave\n");
 		fmt::print(out, "  ret\n");
 	}
+
+	void emit_assembly(std::ostream &out, IR_Compiler const& ir)
+	{
+		fmt::print(out, "BITS 64\n");
+		fmt::print(out, "segment .text\n");
+		fmt::print(out, "extern _start\n");
+		fmt::print(out, "_start:\n");
+		fmt::print(out, "  call main\n");
+		fmt::print(out, "  mov rax, 60\n");
+		fmt::print(out, "  xor rdi, rdi\n");
+		fmt::print(out, "  syscall\n\n");
+
+
+		for (auto const& entry_point : ir.entry_points) {
+			emit_function(out, entry_point.first, entry_point.second);
+			fmt::print(out, "\n");
+		}
+	}
 }
 
 int main(int, char **argv)
 {
+	bool print_tokens = false;
 	bool print_ast = false;
 	bool print_ir = false;
 	std::string_view graph_ir;
@@ -778,10 +871,12 @@ int main(int, char **argv)
 			arg.remove_prefix(1);
 			if (arg.starts_with('-')) arg.remove_prefix(1);
 
-			if (arg == "help")         usage();
-			if (arg == "print-ast")    { print_ast = true; continue; }
-			if (arg == "print-ir")     { print_ir = true;  continue; }
-			if (arg == "where-error")  { report_error_raise_location = true; continue; }
+			if (arg == "help")           usage();
+			if (arg == "print-tokens")   { print_tokens = true; continue; }
+			if (arg == "print-ast")      { print_ast = true; continue; }
+			if (arg == "print-ir")       { print_ir = true;  continue; }
+			if (arg == "where-error")    { report_error_raise_location = true; continue; }
+			if (arg == "no-executable")  { dont_produce_executable = true; continue; }
 
 			if (arg == "graph-ir") {
 				report::ensure(*++argv, "-graph-ir expects filename to put DOT graph");
@@ -804,10 +899,15 @@ int main(int, char **argv)
 
 	auto tokens = lex(source, filename.c_str());
 
-	Parser parser(tokens, filename);
-	auto parse_result = parser.parse_function(tokens);
+	if (print_tokens) {
+		fmt::print("--- TOKENS -------------------------------\n");
+		dump(tokens);
+	}
 
-	report::ensure(parse_result, parse_result.error);
+	Parser parser(tokens, filename);
+	auto parse_result = parser.parse_program(tokens);
+
+	report::ensure(parse_result, parse_result.error_pos, parse_result.error, parse_result.error_rise_location);
 
 	if (print_ast) {
 		fmt::print("--- AST DUMP -----------------------------\n");
@@ -830,6 +930,9 @@ int main(int, char **argv)
 			compiler.dump_dot(file);
 		}
 	}
+
+	if (dont_produce_executable)
+		return 0;
 
 	fs::path asm_path = filename; {
 		asm_path = asm_path.replace_extension("asm");
