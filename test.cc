@@ -54,7 +54,7 @@ std::string_view ltrim(std::string_view sv)
 
 bool test(fs::path source)
 {
-	fmt::print("[TEST] Recording {}\n", source);
+	fmt::print("[TEST] Testing {}\n", source);
 
 	if (os_exec::run("./pl0", source)) {
 		fmt::print("[TEST] Failed during compilation of {}\n", source);
@@ -99,42 +99,57 @@ bool test(fs::path source)
 	return true;
 }
 
+template<typename SC>
+concept Sub_Cmd = requires (SC sc, fs::path path)
+{
+	{ sc.next(path) };
+	{ sc.end() };
+};
+
+void subcommand(char **argv, std::string_view name, Sub_Cmd auto sc)
+{
+	if (*argv != name) return;
+
+	while (*++argv) {
+		fs::path arg{*argv};
+		if (fs::is_directory(arg)) {
+			for (auto entry : fs::recursive_directory_iterator(arg))
+				if (auto path = entry.path(); path.extension() == ".pl0")
+					sc.next(path);
+		} else {
+			sc.next(arg);
+		}
+	}
+
+	sc.end();
+	std::exit(0);
+}
+
 int main(int, char **argv)
 {
 	if (!*++argv) {
 		fmt::print(stderr, "Expected subcommand\n");
 		return 1;
 	}
-	std::string_view subcmd{*argv};
 
-	if (subcmd == "record") {
-		while (*++argv) {
-			fs::path arg{*argv};
-			if (fs::is_directory(arg)) {
-				assert(false && "Recording directories is not supported yet");
+	{
+		struct
+		{
+			unsigned success = 0, total = 0;
+			void next(fs::path arg) { ++total; success += test(arg); }
+			void end() {
+				assert(total != 0 && "None tests were given");
+				fmt::print("Passed {} / {} ({:.2f}%)\n", success, total, 100.f * success / total);
 			}
-			record(arg);
-		}
-		return 0;
+		} spec;
+		subcommand(argv, "run", spec);
 	}
 
-	if (subcmd == "run") {
-		unsigned success = 0, total = 0;
-
-		while (*++argv) {
-			fs::path arg{*argv};
-			if (fs::is_directory(arg)) {
-				assert(false && "Testing directories is not supported yet");
-			}
-			success += test(arg);
-			++total;
-		}
-
-		assert(total != 0 && "None tests were given");
-		fmt::print("Passed {} / {} ({:.2f}%)\n", success, total, 100.f * success / total);
-		return 0;
+	{
+		struct { void next(fs::path arg) { record(arg); } void end() {} } spec;
+		subcommand(argv, "record", spec);
 	}
 
-	fmt::print(stderr, "Unrecognized subcommand: {}\n", subcmd);
+	fmt::print(stderr, "Unrecognized subcommand: {}\n", *argv);
 	return 1;
 }
