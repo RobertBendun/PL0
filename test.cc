@@ -130,6 +130,7 @@ int main(int, char **argv)
 			++total;
 		}
 
+		assert(total != 0 && "None tests were given");
 		fmt::print("Passed {} / {} ({:.2f}%)\n", success, total, 100.f * success / total);
 		return 0;
 	}
